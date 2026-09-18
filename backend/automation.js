@@ -578,30 +578,28 @@ export async function runQuery(page, message, image = null, historyContext = nul
   let userText = message && message.trim() ? message : (image ? 'Descreva ou processe esta imagem' : 'Olá');
   let finalPrompt = userText;
 
+  // ── Parallel Image Generation Task if prompt asks for an image ────────────
   const isImageRequest = /(?:crie|gerar|gere|desenhe|desenho|faça|criar|imagem|foto|fotografia|ilustração|render|draw|generate|image|picture|retrato)/i.test(userText);
+  const parallelImagePromise = (isImageRequest && !image) ? generateAndDownloadImage(userText, log) : Promise.resolve([]);
 
-  if (isImageRequest && !image) {
-    finalPrompt = `[INSTRUÇÃO DO SISTEMA: O usuário solicita a GERAÇÃO VISUAL de uma imagem. Invoque a ferramenta de criação de imagens (DALL-E / Image Generator) e gere a imagem correspondente agora em vez de apenas sugerir prompts textuais ou descrições.]\n\n${userText}`;
-  }
-
-  if (historyContext && historyContext.trim()) {
-    log('[Session] Injecting previous conversation history into prompt...');
-    finalPrompt = `${historyContext.trim()}\n\n---\n[Mensagem Atual do Usuário]: ${finalPrompt}`;
-  }
+  // ── Capture assistant count BEFORE sending prompt to guarantee new turn detection
+  const initialAssistantCount = await page.evaluate(() => {
+    return document.querySelectorAll('[data-message-author-role="assistant"], article [data-message-author-role="assistant"], .agent-turn').length;
+  }).catch(() => 0);
 
   // ── Enter prompt text ─────────────────────────────────────────────────────
   await input.click();
   await sleep(200);
 
   await input.fill(finalPrompt);
-  await sleep(400);
+  await sleep(300);
 
   // Send action
   let dispatched = false;
   try {
     const sendBtn = await page.waitForSelector(
       '[data-testid="send-button"], button[aria-label*="Send" i], button[aria-label*="Enviar" i]',
-      { state: 'visible', timeout: 4000 }
+      { state: 'visible', timeout: 3000 }
     );
     if (sendBtn) {
       await sendBtn.click();
@@ -617,17 +615,13 @@ export async function runQuery(page, message, image = null, historyContext = nul
 
   log('[Session] Query dispatched — streaming response...');
 
-  const initialAssistantCount = await page.evaluate(() => {
-    return document.querySelectorAll('[data-message-author-role="assistant"], article [data-message-author-role="assistant"], .agent-turn').length;
-  }).catch(() => 0);
-
   let lastStreamedText = '';
   let lastChangeTime = Date.now();
   const pollStart = Date.now();
   let doneStreaming = false;
 
   // Poll assistant output every 60ms in-browser to stream tokens live as they arrive
-  while (!doneStreaming && Date.now() - pollStart < 120000) {
+  while (!doneStreaming && Date.now() - pollStart < 45000) {
     await sleep(60);
 
     const snapshot = await page.evaluate((initCount) => {
@@ -654,14 +648,9 @@ export async function runQuery(page, message, image = null, historyContext = nul
       }
     }
 
-    // Done if not generating, or if text has stopped growing for 3 seconds
-    const textSettled = lastStreamedText.length > 0 && Date.now() - lastChangeTime > 3000;
+    // Done if not generating, or if text has stopped growing for 2.5 seconds
+    const textSettled = lastStreamedText.length > 0 && Date.now() - lastChangeTime > 2500;
     if ((!snapshot.isGenerating && lastStreamedText.length > 0) || textSettled) {
-      if (isImageRequest) {
-        await sleep(1500);
-      } else {
-        await sleep(150);
-      }
       doneStreaming = true;
     }
   }
@@ -708,11 +697,11 @@ export async function runQuery(page, message, image = null, historyContext = nul
     log(`[Session] Image extraction notice: ${imgExtractErr.message}`);
   }
 
-  // ── Fallback: If prompt requested an image and ChatGPT returned text-only ──
+  // ── Parallel Fallback: If prompt requested an image and ChatGPT returned text-only ──
   if (extractedImages.length === 0 && isImageRequest) {
-    log('[Session] Triggering high-res AI image generator for requested prompt...');
-    const generated = await generateAndDownloadImage(userText, log);
-    if (generated.length > 0) {
+    log('[Session] Awaiting parallel high-res AI image generator...');
+    const generated = await parallelImagePromise;
+    if (generated && generated.length > 0) {
       extractedImages = generated;
     }
   }

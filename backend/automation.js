@@ -104,6 +104,26 @@ const SEL = {
   primaryBtn: [
     'button[type="submit"]',
     'button.btn-primary',
+    'button:has-text("Continuar")',
+    'button:has-text("Continue")',
+    'button:has-text("Avançar")',
+    'button:has-text("Next")',
+    'button:has-text("Vamos lá")',
+    'button:has-text("Vamos começar")',
+    'button:has-text("Entendi")',
+    'button:has-text("Entendido")',
+    'button:has-text("Concluir")',
+    'button:has-text("Done")',
+    'button:has-text("OK")',
+    'button:has-text("Ok")',
+    'button:has-text("Fechar")',
+    'button:has-text("Dismiss")',
+    'button:has-text("Stay logged out")',
+    'button:has-text("Fique desconectado")',
+    'button[data-testid*="continue" i]',
+    'button[data-testid*="next" i]',
+    'button[data-testid*="submit" i]',
+    'button[data-testid*="onboarding" i]',
   ],
   targetInterface: [
     '[data-testid="prompt-textarea"]',
@@ -122,6 +142,11 @@ async function detectState(page) {
   if (await getVisible(page, SEL.verifyCode))      return 'VERIFY_FORM';
   if (await getVisible(page, SEL.credential))      return 'CREDENTIAL_FORM';
   if (await getVisible(page, SEL.primaryBtn))      return 'NEXT_BTN';
+
+  try {
+    const roleBtn = page.getByRole('button', { name: /continuar|continue|avançar|próximo|next|vamos|entendi|ok|concluir/i }).first();
+    if (await roleBtn.isVisible({ timeout: 600 })) return 'NEXT_BTN';
+  } catch (_) {}
 
   const url = page.url();
   const body = await page.evaluate(() => document.body?.innerText ?? '').catch(() => '');
@@ -343,19 +368,47 @@ export async function provisionSession(log = console.log) {
         continue;
       }
 
-      // ── NEXT_BTN (interstitials, consent screens, etc.) ───────────────────
+      // ── NEXT_BTN (interstitials, consent screens, welcome/continue modals) ───
       if (state === 'NEXT_BTN') {
         continueCycles++;
-        if (continueCycles > 8) {
-          log('[Session] Many consecutive interstitials — pausing...');
+        if (continueCycles > 10) {
+          log('[Session] Consecutive interstitials — sending Enter key and pausing...');
+          await page.keyboard.press('Enter').catch(() => {});
           continueCycles = 0;
-          await sleep(5000);
+          await sleep(3000);
           continue;
         }
+
+        let clicked = false;
         const btn = await getVisible(page, SEL.primaryBtn);
         if (btn) {
-          log(`[Session] Advancing interstitial #${continueCycles}...`);
-          await btn.click();
+          log(`[Session] Advancing "Continuar" / primary button #${continueCycles}...`);
+          try {
+            await btn.click({ force: true, timeout: 3000 });
+            clicked = true;
+          } catch (_) {
+            try {
+              await btn.evaluate(b => b.click());
+              clicked = true;
+            } catch (__) {}
+          }
+          await sleep(2000);
+        }
+
+        if (!clicked) {
+          try {
+            const roleBtn = page.getByRole('button', { name: /continuar|continue|avançar|próximo|next|vamos|entendi|ok|concluir/i }).first();
+            if (await roleBtn.isVisible({ timeout: 1500 })) {
+              log(`[Session] Advancing role button "Continuar" #${continueCycles}...`);
+              await roleBtn.click({ force: true });
+              clicked = true;
+              await sleep(2000);
+            }
+          } catch (_) {}
+        }
+
+        if (!clicked) {
+          await page.keyboard.press('Enter').catch(() => {});
           await sleep(2000);
         }
         continue;

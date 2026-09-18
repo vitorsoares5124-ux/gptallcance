@@ -36,7 +36,7 @@ function getApiEndpoint() {
   if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
     return 'http://localhost:3000';
   }
-  return window.location.origin;
+  return 'http://localhost:3000';
 }
 
 let API = getApiEndpoint();
@@ -58,6 +58,17 @@ const appContainer     = document.getElementById('app-container');
 const userEmailEl      = document.getElementById('user-email');
 const sidebarUserEmail = document.getElementById('sidebar-user-email');
 const logoutBtn        = document.getElementById('logout-btn');
+const serverBtn        = document.getElementById('server-btn');
+const serverBtnLabel   = document.getElementById('server-btn-label');
+
+// Server Modal elements
+const serverModal      = document.getElementById('server-modal');
+const serverModalClose = document.getElementById('server-modal-close');
+const serverModalBdrop = document.getElementById('server-modal-backdrop');
+const backendUrlInput  = document.getElementById('backend-url-input');
+const serverTestFeedback = document.getElementById('server-test-feedback');
+const serverTestBtn    = document.getElementById('server-test-btn');
+const serverSaveBtn    = document.getElementById('server-save-btn');
 
 // Sidebar elements
 const chatSidebar      = document.getElementById('chat-sidebar');
@@ -350,7 +361,7 @@ sidebarBackdrop.addEventListener('click', () => {
   appContainer.classList.remove('sidebar-mobile-open');
 });
 
-// ─── Status (SSE & REST) ────────────────────────────────────────────────────
+// ─── Status & Server Discovery (SSE & REST) ──────────────────────────────────
 
 function updateStatus(status) {
   if (!statusDot || !statusLabel) return;
@@ -358,9 +369,11 @@ function updateStatus(status) {
   if (status && status.active) {
     statusDot.className = 'status-dot active';
     statusLabel.textContent = 'Pronto';
+    if (serverBtnLabel) serverBtnLabel.textContent = 'Conectado';
   } else {
     statusDot.className = 'status-dot creating';
     statusLabel.textContent = 'Conectando aos servidores...';
+    if (serverBtnLabel) serverBtnLabel.textContent = 'Servidor';
   }
 }
 
@@ -370,18 +383,50 @@ function handleRotating() {
   addRotationNotice();
 }
 
-async function checkInitialStatus() {
+async function testEndpoint(url) {
+  const cleanUrl = url.replace(/\/+$/, '');
+  const ctrl = new AbortController();
+  const tid = setTimeout(() => ctrl.abort(), 3500);
   try {
-    const res = await fetch(`${API}/status`);
+    const res = await fetch(`${cleanUrl}/status`, { signal: ctrl.signal });
+    clearTimeout(tid);
     if (res.ok) {
       const data = await res.json();
-      updateStatus(data);
+      return { ok: true, data };
     }
   } catch (_) {}
+  clearTimeout(tid);
+  return { ok: false };
+}
+
+async function checkInitialStatus() {
+  // Test current API
+  let res = await testEndpoint(API);
+  if (res.ok) {
+    updateStatus(res.data);
+    return;
+  }
+
+  // Fallback discovery: try localhost:3000, 127.0.0.1:3000, origin
+  const candidates = ['http://localhost:3000', 'http://127.0.0.1:3000', window.location.origin];
+  for (const candidate of candidates) {
+    if (candidate === API) continue;
+    res = await testEndpoint(candidate);
+    if (res.ok) {
+      API = candidate;
+      localStorage.setItem('allcance_backend_url', candidate);
+      updateStatus(res.data);
+      connectSSE();
+      return;
+    }
+  }
 }
 
 function connectSSE() {
-  if (eventSourceInstance) eventSourceInstance.close();
+  if (eventSourceInstance) {
+    eventSourceInstance.close();
+    eventSourceInstance = null;
+  }
 
   checkInitialStatus();
 
@@ -409,6 +454,58 @@ function connectSSE() {
     if (statusDot) statusDot.className = 'status-dot creating';
     if (statusLabel) statusLabel.textContent = 'Conectando aos servidores...';
   }
+}
+
+// ─── Server Configuration Modal ──────────────────────────────────────────────
+
+function openServerModal() {
+  if (backendUrlInput) backendUrlInput.value = API;
+  if (serverTestFeedback) {
+    serverTestFeedback.className = 'server-feedback auth-hidden';
+    serverTestFeedback.textContent = '';
+  }
+  if (serverModal) serverModal.classList.remove('modal-hidden');
+}
+
+function closeServerModal() {
+  if (serverModal) serverModal.classList.add('modal-hidden');
+}
+
+if (serverBtn) serverBtn.addEventListener('click', openServerModal);
+if (statusDot) statusDot.parentElement.addEventListener('click', openServerModal);
+if (serverModalClose) serverModalClose.addEventListener('click', closeServerModal);
+if (serverModalBdrop) serverModalBdrop.addEventListener('click', closeServerModal);
+
+if (serverTestBtn) {
+  serverTestBtn.addEventListener('click', async () => {
+    const targetUrl = (backendUrlInput.value || '').trim();
+    if (!targetUrl) return;
+
+    serverTestFeedback.className = 'server-feedback';
+    serverTestFeedback.textContent = 'Testando conexão...';
+    serverTestFeedback.classList.remove('auth-hidden');
+
+    const result = await testEndpoint(targetUrl);
+    if (result.ok) {
+      serverTestFeedback.className = 'server-feedback success';
+      serverTestFeedback.textContent = `✓ Conexão estabelecida com sucesso! (${result.data.active ? 'Sessão ativa' : 'Iniciando instâncias'})`;
+    } else {
+      serverTestFeedback.className = 'server-feedback error';
+      serverTestFeedback.textContent = '✗ Não foi possível conectar a este endereço. Verifique se o backend está rodando.';
+    }
+  });
+}
+
+if (serverSaveBtn) {
+  serverSaveBtn.addEventListener('click', async () => {
+    const targetUrl = (backendUrlInput.value || '').trim().replace(/\/+$/, '');
+    if (!targetUrl) return;
+
+    API = targetUrl;
+    localStorage.setItem('allcance_backend_url', targetUrl);
+    closeServerModal();
+    connectSSE();
+  });
 }
 
 // ─── Image Attachment & Compression ──────────────────────────────────────────

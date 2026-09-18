@@ -103,6 +103,16 @@
         </div>
 
         <div class="header-right" id="user-section">
+          <button type="button" id="server-btn" aria-label="Configurar Servidor Backend" title="Configurar Servidor">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+              <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+              <line x1="6" y1="6" x2="6.01" y2="6"></line>
+              <line x1="6" y1="18" x2="6.01" y2="18"></line>
+            </svg>
+            <span id="server-btn-label">Servidor</span>
+          </button>
+
           <button type="button" id="logout-btn" aria-label="Encerrar sessão" title="Sair da conta">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
               <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
@@ -172,6 +182,30 @@
     <div class="modal-content">
       <img id="modal-img" src="" alt="Imagem ampliada" />
       <button type="button" id="modal-close" aria-label="Fechar">✕</button>
+    </div>
+  </div>
+
+  <!-- ── Server Config Modal ────────────────────────────────────────────────── -->
+  <div id="server-modal" class="modal-hidden">
+    <div class="modal-backdrop" id="server-modal-backdrop"></div>
+    <div class="server-modal-card">
+      <div class="server-modal-header">
+        <h2 class="server-modal-title">Conexão do Servidor</h2>
+        <button type="button" id="server-modal-close" class="server-modal-close-btn" aria-label="Fechar">✕</button>
+      </div>
+      <p class="server-modal-desc">Defina a URL do seu backend local ou túnel para conectar a IA.</p>
+
+      <div class="input-group">
+        <label for="backend-url-input">URL do Backend</label>
+        <input type="text" id="backend-url-input" placeholder="http://localhost:3000" />
+      </div>
+
+      <div id="server-test-feedback" class="server-feedback auth-hidden"></div>
+
+      <div class="server-modal-actions">
+        <button type="button" id="server-test-btn" class="secondary-action-btn">Testar</button>
+        <button type="button" id="server-save-btn" class="primary-action-btn">Salvar</button>
+      </div>
     </div>
   </div>
 

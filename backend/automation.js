@@ -1,14 +1,24 @@
 // session.js (automation.js)
-// Browser session provisioning for QA automation suite.
+// Browser session provisioning & persistence for QA automation suite.
 //
-// DESIGN: screen-reader state machine — zero URL assumptions.
-// Supports text queries and image attachments (Vision & DALL-E image generation).
+// Supports:
+//   - Persistent session storage across restarts (storageState)
+//   - Text queries and image attachments (Vision & DALL-E)
+//   - Context Injection across session rotations
 
 import { chromium } from 'playwright';
 import { createInboxAccount, waitForVerificationCode } from './tempmail.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+
+const SESSIONS_DIR = path.join(process.cwd(), 'sessions');
+
+function ensureSessionsDir() {
+  if (!fs.existsSync(SESSIONS_DIR)) {
+    fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+  }
+}
 
 // ─── Browser instance ─────────────────────────────────────────────────────────
 
@@ -115,7 +125,6 @@ async function detectState(page) {
   const url = page.url();
   const body = await page.evaluate(() => document.body?.innerText ?? '').catch(() => '');
 
-  // Detect Cloudflare challenge (either via iframe or body content)
   const isCloudflare = page.frames().some(f => f.url().includes('challenges.cloudflare.com')) ||
                        body.toLowerCase().includes('confirme que é humano') ||
                        body.toLowerCase().includes('confirm you are human') ||
@@ -370,9 +379,70 @@ export async function provisionSession(log = console.log) {
   }
 }
 
-// ─── Run query (Text + Image support) ─────────────────────────────────────────
+// ─── Resume or Create Persistent Session ──────────────────────────────────────
 
-export async function runQuery(page, message, image = null, log = console.log) {
+export async function resumeOrCreateSession(slot = 'active', log = console.log) {
+  ensureSessionsDir();
+  const statePath = path.join(SESSIONS_DIR, `${slot}_state.json`);
+  const metaPath = path.join(SESSIONS_DIR, `${slot}_meta.json`);
+
+  // Try resuming existing session from storageState
+  if (fs.existsSync(statePath) && fs.existsSync(metaPath)) {
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+      log(`[Session] Found saved session for ${slot} (${meta.email}). Resuming...`);
+
+      const browser = await createFreshBrowser();
+      const ua = USER_AGENTS[0];
+      const vp = VIEWPORTS[0];
+
+      const context = await browser.newContext({
+        storageState: statePath,
+        userAgent: ua,
+        viewport: vp,
+        locale: 'pt-BR',
+        extraHTTPHeaders: { 'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8' },
+      });
+
+      const page = await context.newPage();
+      await page.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        window.chrome = { runtime: {} };
+      });
+
+      await page.goto(cfg.target, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await sleep(2500);
+
+      const state = await detectState(page);
+      if (state === 'SESSION_READY') {
+        log(`[Session] ✓ Session for ${meta.email} successfully resumed and ready!`);
+        return { email: meta.email, page, context, browser, isResumed: true };
+      } else {
+        log(`[Session] Saved session expired or invalid (state: ${state}). Creating new one...`);
+        await context.close().catch(() => {});
+        await browser.close().catch(() => {});
+      }
+    } catch (resumeErr) {
+      log(`[Session] Could not resume session: ${resumeErr.message}. Creating new one...`);
+    }
+  }
+
+  // Provision brand new session
+  const session = await provisionSession(log);
+  try {
+    await session.context.storageState({ path: statePath });
+    fs.writeFileSync(metaPath, JSON.stringify({ email: session.email, createdAt: new Date().toISOString() }, null, 2));
+    log(`[Session] ✓ Session state saved to ${slot}_state.json`);
+  } catch (saveErr) {
+    log(`[Session] ⚠ Could not save session state: ${saveErr.message}`);
+  }
+
+  return { ...session, isResumed: false };
+}
+
+// ─── Run query (Text + Image + Context Injection support) ─────────────────────
+
+export async function runQuery(page, message, image = null, historyContext = null, log = console.log) {
   let input = await getVisible(page, SEL.targetInterface);
 
   if (!input) {
@@ -423,7 +493,6 @@ export async function runQuery(page, message, image = null, log = console.log) {
 
         log(`[Session] Uploading image (${ext})...`);
 
-        // Check if file input is in DOM or trigger attach button
         let fileInput = await page.$('input[type="file"]');
         if (!fileInput) {
           const attachBtn = await page.$(
@@ -437,7 +506,6 @@ export async function runQuery(page, message, image = null, log = console.log) {
         if (fileInput) {
           await fileInput.setInputFiles(tempFilePath);
           log('[Session] Image attached — awaiting preview upload...');
-          // Give ChatGPT 2s to process the thumbnail upload
           await sleep(2500);
         } else {
           log('[Session] ⚠ Could not locate file input selector on ChatGPT');
@@ -448,12 +516,20 @@ export async function runQuery(page, message, image = null, log = console.log) {
     }
   }
 
+  // ── Context Injection / Prompt composition ────────────────────────────────
+  let userText = message && message.trim() ? message : (image ? 'Descreva ou processe esta imagem' : 'Olá');
+  let finalPrompt = userText;
+
+  if (historyContext && historyContext.trim()) {
+    log('[Session] Injecting previous conversation history into prompt...');
+    finalPrompt = `${historyContext.trim()}\n\n---\n[Mensagem Atual do Usuário]: ${userText}`;
+  }
+
   // ── Enter prompt text ─────────────────────────────────────────────────────
   await input.click();
   await sleep(200);
 
-  const promptText = message && message.trim() ? message : (image ? 'Descreva ou processe esta imagem' : 'Olá');
-  await input.fill(promptText);
+  await input.fill(finalPrompt);
   await sleep(400);
 
   // Send action
@@ -478,7 +554,6 @@ export async function runQuery(page, message, image = null, log = console.log) {
 
   log('[Session] Query dispatched — awaiting response...');
 
-  // Record initial assistant count
   const initialAssistantCount = (await page.$$('[data-message-author-role="assistant"]')).length;
 
   // Wait for new response element to appear
@@ -509,8 +584,6 @@ export async function runQuery(page, message, image = null, log = console.log) {
       return imgs
         .filter((img) => {
           const src = img.src || '';
-          const alt = img.alt || '';
-          // Filter out user avatars or system icons
           if (src.includes('avatar') || src.includes('profile') || src.includes('icon')) return false;
           if (img.width > 0 && img.width < 50 && img.height > 0 && img.height < 50) return false;
           return true;
@@ -521,7 +594,6 @@ export async function runQuery(page, message, image = null, log = console.log) {
         }));
     });
 
-    // Convert blob / CDN images to Base64 data URLs for seamless offline rendering
     for (const imgItem of extractedImages) {
       if (imgItem.src) {
         try {

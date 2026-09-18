@@ -6,3 +6,5 @@ history/
 error_state.png
 .DS_Store
 Thumbs.db
+
+backend/cloudflared.exe

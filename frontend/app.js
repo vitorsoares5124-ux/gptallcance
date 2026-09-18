@@ -1,9 +1,32 @@
-// app.js — AllcanceAI frontend logic with Multi-Conversation History & Supabase Auth
+// app.js — AllcanceAI frontend logic with Multi-Conversation History & Robust Supabase Auth
 
 const SUPABASE_URL  = 'https://wlwnjhwgaygfjkxayyjc.supabase.co';
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Indsd25qaHdnYXlnZmpreGF5eWpjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk3MTQyNzcsImV4cCI6MjEwNTI5MDI3N30.yJ40at7zGlDcXlat0XeNpy0CBkKPrwoAHcuv2S3sPv4';
 
-const supabase = window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON) : null;
+// Dynamic Supabase Client instance
+let _supabaseClient = null;
+
+async function getSupabase() {
+  if (_supabaseClient) return _supabaseClient;
+
+  // If window.supabase is not loaded yet, wait up to 4s
+  let attempts = 0;
+  while (!window.supabase && attempts < 20) {
+    await new Promise((r) => setTimeout(r, 200));
+    attempts++;
+  }
+
+  if (window.supabase && typeof window.supabase.createClient === 'function') {
+    _supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+      },
+    });
+    return _supabaseClient;
+  }
+  return null;
+}
 
 // API endpoint configuration (supports Localhost, Vercel & Custom Tunnel/VPS)
 function getApiEndpoint() {
@@ -78,14 +101,16 @@ let activeConversationId = null;
 // ─── Supabase Authentication ─────────────────────────────────────────────────
 
 async function initAuth() {
-  if (!supabase) {
-    showApp({ user: { id: 'local_user', email: 'admin@allcance.ai' } });
+  const sb = await getSupabase();
+  if (!sb) {
+    console.warn('[Auth] Supabase library not available, fallback to direct access.');
+    showApp({ user: { id: 'admin_local', email: 'admin@allcance.ai' } });
     return;
   }
 
   try {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (session) {
+    const { data: { session } } = await sb.auth.getSession();
+    if (session && session.user) {
       showApp(session);
     } else {
       showAuth();
@@ -94,8 +119,8 @@ async function initAuth() {
     showAuth();
   }
 
-  supabase.auth.onAuthStateChange((_event, session) => {
-    if (session) {
+  sb.auth.onAuthStateChange((_event, session) => {
+    if (session && session.user) {
       showApp(session);
     } else {
       showAuth();
@@ -130,30 +155,53 @@ function showApp(session) {
 
 authForm.addEventListener('submit', async (e) => {
   e.preventDefault();
+  e.stopPropagation();
+
   authError.classList.add('auth-hidden');
   authError.textContent = '';
 
   const email = authEmail.value.trim();
   const password = authPassword.value;
 
-  if (!email || !password) return;
+  if (!email || !password) {
+    authError.textContent = 'Preencha o e-mail e a senha.';
+    authError.classList.remove('auth-hidden');
+    return;
+  }
 
   authSubmitBtn.disabled = true;
   authBtnText.classList.add('auth-hidden');
   authBtnSpinner.classList.remove('auth-hidden');
 
   try {
-    const { data, error } = await supabase.auth.signInWithPassword({
+    const sb = await getSupabase();
+    if (!sb) {
+      throw new Error('Não foi possível conectar ao servidor de autenticação Supabase.');
+    }
+
+    const { data, error } = await sb.auth.signInWithPassword({
       email,
       password,
     });
 
-    if (error) throw error;
+    if (error) {
+      throw error;
+    }
+
+    if (!data.session) {
+      throw new Error('Sessão não iniciada. Verifique se o e-mail foi confirmado no Supabase.');
+    }
+
     showApp(data.session);
   } catch (err) {
-    authError.textContent = err.message === 'Invalid login credentials'
-      ? 'E-mail ou senha incorretos.'
-      : (err.message || 'Erro ao realizar login.');
+    console.error('[Auth] Login error:', err);
+    let msg = err.message || 'Erro ao realizar login.';
+    if (msg.includes('Invalid login credentials')) {
+      msg = 'E-mail ou senha incorretos. Verifique suas credenciais.';
+    } else if (msg.includes('Email not confirmed')) {
+      msg = 'E-mail não confirmado no Supabase. Marque o e-mail como confirmado no painel.';
+    }
+    authError.textContent = msg;
     authError.classList.remove('auth-hidden');
   } finally {
     authSubmitBtn.disabled = false;
@@ -163,8 +211,9 @@ authForm.addEventListener('submit', async (e) => {
 });
 
 logoutBtn.addEventListener('click', async () => {
-  if (supabase) {
-    await supabase.auth.signOut();
+  const sb = await getSupabase();
+  if (sb) {
+    await sb.auth.signOut().catch(() => {});
   }
   showAuth();
 });
@@ -183,7 +232,6 @@ function loadConversations() {
     conversations = [];
   }
 
-  // If there are existing conversations, activate the most recent one
   if (conversations.length > 0) {
     switchToConversation(conversations[0].id);
   } else {
@@ -207,7 +255,6 @@ function startNewChat() {
   renderConversationsList();
   input.focus();
 
-  // Close sidebar on mobile
   if (window.innerWidth <= 768) {
     appContainer.classList.remove('sidebar-mobile-open');
   }
@@ -636,7 +683,6 @@ form.addEventListener('submit', async (e) => {
   input.style.height = 'auto';
   clearImage();
 
-  // If there's no active conversation, create one now
   let conv = conversations.find(c => c.id === activeConversationId);
   if (!conv) {
     const newId = `conv_${Date.now()}`;
@@ -653,7 +699,6 @@ form.addEventListener('submit', async (e) => {
     saveConversations();
   }
 
-  // Add user message to state and UI
   const userMsgObj = {
     role: 'user',
     text: message,
@@ -668,7 +713,6 @@ form.addEventListener('submit', async (e) => {
   renderMessageInDOM('user', message, currentImage);
   addTypingIndicator();
 
-  // Extract recent conversation history to send to backend for context injection
   const historyPayload = conv.messages.slice(-15).map(m => ({
     role: m.role,
     text: m.text || (m.imageAttachment ? '[Imagem enviada]' : ''),

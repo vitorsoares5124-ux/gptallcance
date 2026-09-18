@@ -1037,7 +1037,7 @@ form.addEventListener('submit', async (e) => {
               } else if (currentEvent === 'done') {
                 finalResultData = payload;
                 let textResult = payload.text || accumulatedText || '';
-                const isWidgetOnly = !textResult || /^(?:\s*Finalizando|\s*\d{1,3}%|\s*Criando imagem|\s*Gerando imagem|\s*Thinking|\s*Pensando)+\s*$/i.test(textResult);
+                const isWidgetOnly = !textResult || /^(?:\s*Editar|\s*Edit|\s*Finalizando|\s*\d{1,3}%|\s*Criando imagem|\s*Gerando imagem|\s*Thinking|\s*Pensando)+\s*$/i.test(textResult);
                 if (payload.images && payload.images.length > 0 && isWidgetOnly) {
                   textResult = 'Aqui está a imagem gerada de acordo com o seu pedido:';
                 }

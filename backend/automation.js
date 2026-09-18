@@ -617,18 +617,7 @@ export async function runQuery(page, message, image = null, historyContext = nul
 
   log('[Session] Query dispatched — streaming response...');
 
-  // ── IMAGE REQUEST: skip ChatGPT DOM polling entirely ─────────────────────
-  if (isImageRequest && !image) {
-    log('[ImageGen] Image request detected — using Flux.1 generator directly (skipping ChatGPT DOM)...');
-    if (typeof onChunk === 'function') {
-      onChunk('Gerando imagem em alta resolução...');
-    }
-    const generated = await generateAndDownloadImage(userText, log);
-    const responseText = 'Aqui está a imagem gerada de acordo com o seu pedido:';
-    return { text: responseText, images: generated, isLimited: false };
-  }
-
-  // ── TEXT REQUEST: poll ChatGPT DOM normally ───────────────────────────────
+  // ── TEXT & IMAGE REQUEST: poll ChatGPT DOM with Live Feedback ─────────────
   function cleanWidgetText(txt) {
     if (!txt) return '';
     return txt
@@ -642,9 +631,14 @@ export async function runQuery(page, message, image = null, historyContext = nul
   let lastChangeTime = Date.now();
   const pollStart = Date.now();
   let doneStreaming = false;
+  const maxWaitMs = isImageRequest ? 65000 : 45000;
 
-  while (!doneStreaming && Date.now() - pollStart < 45000) {
-    await sleep(60);
+  if (isImageRequest && typeof onChunk === 'function') {
+    onChunk('🎨 Criando imagem com IA... (aguarde alguns instantes)');
+  }
+
+  while (!doneStreaming && Date.now() - pollStart < maxWaitMs) {
+    await sleep(80);
 
     const snapshot = await page.evaluate((initCount) => {
       const assistantEls = document.querySelectorAll('[data-message-author-role="assistant"], article [data-message-author-role="assistant"], .agent-turn');
@@ -652,19 +646,29 @@ export async function runQuery(page, message, image = null, historyContext = nul
       const hasStopBtn = !!(stopBtn && !stopBtn.disabled && (stopBtn.offsetWidth > 0 || stopBtn.offsetHeight > 0));
       const hasPulse = !!document.querySelector('.animate-pulse, [aria-label*="Generating" i], [aria-label*="Gerando" i], [data-testid*="image-generating"]');
 
+      let hasImg = false;
+      let rawText = '';
       if (assistantEls.length > 0) {
         const lastEl = assistantEls[assistantEls.length - 1];
-        const text = lastEl.innerText || lastEl.textContent || '';
-        return {
-          text,
-          isGenerating: hasStopBtn || hasPulse,
-          hasEl: true,
-          count: assistantEls.length,
-          isNew: assistantEls.length > initCount,
-        };
+        rawText = lastEl.innerText || lastEl.textContent || '';
+        const imgs = lastEl.querySelectorAll('img');
+        for (const im of imgs) {
+          if (im.offsetWidth > 100 && im.offsetHeight > 100) {
+            hasImg = true;
+            break;
+          }
+        }
       }
-      return { text: '', isGenerating: true, hasEl: false, count: 0, isNew: false };
-    }, initialAssistantCount).catch(() => ({ text: '', isGenerating: false, hasEl: false, count: 0, isNew: false }));
+
+      return {
+        text: rawText,
+        isGenerating: hasStopBtn || hasPulse,
+        hasImg,
+        hasEl: assistantEls.length > 0,
+        count: assistantEls.length,
+        isNew: assistantEls.length > initCount,
+      };
+    }, initialAssistantCount).catch(() => ({ text: '', isGenerating: false, hasImg: false, hasEl: false, count: 0, isNew: false }));
 
     const cleanedText = cleanWidgetText(snapshot.text);
 
@@ -676,20 +680,34 @@ export async function runQuery(page, message, image = null, historyContext = nul
       }
     }
 
-    // Done if not generating AND we have captured some text, or if text has settled for 1.8s
-    const elapsed = Date.now() - pollStart;
-    const textSettled = lastStreamedText.length > 0 && Date.now() - lastChangeTime > 1800;
-    if ((!snapshot.isGenerating && lastStreamedText.length > 0 && elapsed > 1000) || textSettled) {
+    // If image appeared in DOM, give 400ms to settle then complete
+    if (snapshot.hasImg) {
+      await sleep(400);
       doneStreaming = true;
+      break;
+    }
+
+    // Done if not generating AND we have captured text or time elapsed
+    const elapsed = Date.now() - pollStart;
+    const textSettled = lastStreamedText.length > 0 && Date.now() - lastChangeTime > 2000;
+    if (!isImageRequest) {
+      if ((!snapshot.isGenerating && lastStreamedText.length > 0 && elapsed > 1000) || textSettled) {
+        doneStreaming = true;
+      }
+    } else {
+      // For image requests, if stop button disappeared and at least 6s elapsed
+      if (!snapshot.isGenerating && elapsed > 6000) {
+        doneStreaming = true;
+      }
     }
   }
 
-  const responseElements = await page.$$('[data-message-author-role="assistant"]');
+  const responseElements = await page.$$('[data-message-author-role="assistant"], article [data-message-author-role="assistant"], .agent-turn');
   let lastEl = responseElements.length > 0 ? responseElements[responseElements.length - 1] : null;
   let rawText = lastStreamedText || (lastEl ? await lastEl.innerText().catch(() => '') : '');
   let responseText = cleanWidgetText(rawText);
 
-  // ── Extract generated images (DALL-E / Visual Outputs) ──────────────────────
+  // ── Extract generated images from ChatGPT DOM ───────────────────────────────
   let extractedImages = [];
   try {
     if (lastEl) {
@@ -701,16 +719,16 @@ export async function runQuery(page, message, image = null, historyContext = nul
           if (!isVisible) continue;
 
           const box = await imgEl.boundingBox().catch(() => null);
-          if (!box || box.width < 80 || box.height < 80) continue; // ignore avatars and icons
+          if (!box || box.width < 90 || box.height < 90) continue; // ignore avatars and icons
 
           const src = (await imgEl.getAttribute('src').catch(() => '')) || '';
           if (src.includes('avatar') || src.includes('profile') || src.includes('icon')) continue;
 
-          const alt = (await imgEl.getAttribute('alt').catch(() => '')) || 'Imagem gerada';
+          const alt = (await imgEl.getAttribute('alt').catch(() => '')) || 'Imagem gerada pela IA';
 
-          // Direct element screenshot guarantees 100% visual capture with no CORS / CDN token expiration
-          const buffer = await imgEl.screenshot({ type: 'png' });
-          const dataUrl = `data:image/png;base64,${buffer.toString('base64')}`;
+          // Direct element screenshot guarantees 100% visual capture with zero CORS issues
+          const buffer = await imgEl.screenshot({ type: 'png' }).catch(() => null);
+          const dataUrl = buffer ? `data:image/png;base64,${buffer.toString('base64')}` : src;
 
           extractedImages.push({
             src: dataUrl,
@@ -727,8 +745,18 @@ export async function runQuery(page, message, image = null, historyContext = nul
     log(`[Session] Image extraction notice: ${imgExtractErr.message}`);
   }
 
-  // If we have images and text is empty or was only widget residue, provide a clean response title
-  if (extractedImages.length > 0 && (!responseText || responseText.length < 3)) {
+  // ── Multi-Engine Fallback: If image requested but not captured in DOM ────────
+  if (isImageRequest && extractedImages.length === 0) {
+    log('[ImageGen] Image not found in DOM — triggering multi-engine fallback generator...');
+    if (typeof onChunk === 'function') {
+      onChunk('🎨 Renderizando imagem em alta resolução...');
+    }
+    extractedImages = await generateFallbackImage(userText, log);
+  }
+
+  // Clean companion text for image responses
+  const isWidgetText = !responseText || responseText.length < 3 || /^(?:\s*Editar|\s*Edit|\s*Finalizando|\s*\d{1,3}%|\s*Criando imagem|\s*Gerando imagem)+\s*$/i.test(responseText);
+  if (extractedImages.length > 0 && isWidgetText) {
     responseText = 'Aqui está a imagem gerada de acordo com o seu pedido:';
   }
 
@@ -745,50 +773,66 @@ export async function runQuery(page, message, image = null, historyContext = nul
 }
 
 /**
- * Generates and downloads a hyper-realistic AI image directly in high resolution.
+ * Bulletproof Multi-Engine Image Generator with redundant endpoints and automatic retry.
  */
-export async function generateAndDownloadImage(prompt, log = console.log) {
-  try {
-    let cleanPrompt = prompt
-      .replace(/\[INSTRUÇÃO DO SISTEMA:[^\]]+\]/gi, '')
-      .replace(/\[Mensagem Atual do Usuário\]:/gi, '')
-      .replace(/crie uma imagem (?:hiperrealista|realista|de|pra mim, de)?/gi, '')
-      .replace(/gere uma imagem (?:hiperrealista|realista|de)?/gi, '')
-      .replace(/desenhe (?:uma imagem de)?/gi, '')
-      .replace(/faça uma imagem (?:de)?/gi, '')
-      .trim();
+export async function generateFallbackImage(prompt, log = console.log) {
+  let cleanPrompt = prompt
+    .replace(/\[INSTRUÇÃO DO SISTEMA:[^\]]+\]/gi, '')
+    .replace(/\[Mensagem Atual do Usuário\]:/gi, '')
+    .replace(/crie uma imagem (?:hiperrealista|realista|de|pra mim, de)?/gi, '')
+    .replace(/gere uma imagem (?:hiperrealista|realista|de)?/gi, '')
+    .replace(/desenhe (?:uma imagem de)?/gi, '')
+    .replace(/faça uma imagem (?:de)?/gi, '')
+    .trim();
 
-    if (!cleanPrompt) cleanPrompt = prompt;
+  if (!cleanPrompt) cleanPrompt = prompt;
 
-    log(`[ImageGen] Generating high-resolution image via Flux engine: "${cleanPrompt.slice(0, 70)}..."`);
+  const engines = [
+    (p, s) => `https://image.pollinations.ai/prompt/${encodeURIComponent(p)}?width=1024&height=1024&nologo=true&model=flux&seed=${s}`,
+    (p, s) => `https://image.pollinations.ai/prompt/${encodeURIComponent(p)}?width=1024&height=1024&nologo=true&model=turbo&seed=${s}`,
+    (p, s) => `https://image.pollinations.ai/prompt/${encodeURIComponent(p)}?width=1024&height=1024&nologo=true&seed=${s}`,
+  ];
 
-    const seed = Math.floor(Math.random() * 1000000);
-    const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(cleanPrompt)}?width=1024&height=1024&nologo=true&model=flux&seed=${seed}`;
+  for (let i = 0; i < engines.length; i++) {
+    try {
+      const seed = Math.floor(Math.random() * 1000000);
+      const url = engines[i](cleanPrompt, seed);
+      log(`[ImageGen] Trying engine ${i + 1} for: "${cleanPrompt.slice(0, 50)}..."`);
 
-    const res = await fetch(imageUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      },
-    });
+      const ctrl = new AbortController();
+      const tid = setTimeout(() => ctrl.abort(), 14000);
 
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const res = await fetch(url, {
+        signal: ctrl.signal,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+          'Accept': 'image/jpeg,image/png,image/*;q=0.9',
+        },
+      });
+      clearTimeout(tid);
 
-    const arrayBuffer = await res.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-    const base64 = buffer.toString('base64');
-    const dataUrl = `data:image/jpeg;base64,${base64}`;
-
-    log(`[ImageGen] ✓ Image successfully generated & downloaded (${Math.round(buffer.byteLength / 1024)} KB)`);
-
-    return [{
-      src: dataUrl,
-      dataUrl,
-      alt: cleanPrompt,
-    }];
-  } catch (err) {
-    log(`[ImageGen] ⚠ Image generator note: ${err.message}`);
-    return [];
+      if (res.ok) {
+        const arrayBuffer = await res.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        if (buffer.byteLength > 2000) {
+          const base64 = buffer.toString('base64');
+          const dataUrl = `data:image/jpeg;base64,${base64}`;
+          log(`[ImageGen] ✓ Image successfully generated & downloaded (${Math.round(buffer.byteLength / 1024)} KB)`);
+          return [{
+            src: dataUrl,
+            dataUrl,
+            alt: cleanPrompt,
+          }];
+        }
+      } else {
+        log(`[ImageGen] Engine ${i + 1} returned status ${res.status}`);
+      }
+    } catch (err) {
+      log(`[ImageGen] Engine ${i + 1} error: ${err.message}`);
+    }
   }
+
+  return [];
 }
 
 // Legacy aliases

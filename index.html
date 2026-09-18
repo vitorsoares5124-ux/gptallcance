@@ -11,17 +11,17 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700&family=IBM+Plex+Mono:wght@300;400&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet" />
 
-  <link rel="stylesheet" href="frontend/style.css" />
+  <link rel="stylesheet" href="/style.css" />
   <!-- Supabase JS Client v2 -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
 
-  <!-- ── Authentication Screen (Shown when logged out) ─────────────────────── -->
-  <div id="auth-screen" class="auth-hidden">
+  <!-- ── Authentication Screen (Visible by default until session verified) ─── -->
+  <div id="auth-screen">
     <div class="auth-card">
       <div class="auth-header">
-        <img src="frontend/assets/logo.jpg" alt="AllcanceAI" class="auth-logo" />
+        <img src="/assets/logo.jpg" alt="AllcanceAI" class="auth-logo" />
         <h1 class="auth-title">Acesso Restrito</h1>
         <p class="auth-subtitle">Digite suas credenciais para acessar a inteligência.</p>
       </div>
@@ -47,13 +47,13 @@
     </div>
   </div>
 
-  <!-- ── Main App Container (Shown when logged in) ─────────────────────────── -->
+  <!-- ── Main App Container (Revealed when logged in) ───────────────────────── -->
   <div id="app-container" class="app-hidden">
     <!-- Header -->
     <header id="site-header">
       <div class="header-left">
         <a class="brand" href="/" aria-label="AllcanceAI">
-          <img src="frontend/assets/logo.jpg" alt="AllcanceAI" class="brand-logo" />
+          <img src="/assets/logo.jpg" alt="AllcanceAI" class="brand-logo" />
         </a>
 
         <div class="status-bar" id="status-bar" aria-live="polite">
@@ -135,6 +135,6 @@
     </div>
   </div>
 
-  <script src="frontend/app.js"></script>
+  <script src="/app.js"></script>
 </body>
 </html>

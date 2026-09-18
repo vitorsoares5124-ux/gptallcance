@@ -622,6 +622,7 @@ export async function runQuery(page, message, image = null, historyContext = nul
   }).catch(() => 0);
 
   let lastStreamedText = '';
+  let lastChangeTime = Date.now();
   const pollStart = Date.now();
   let doneStreaming = false;
 
@@ -633,12 +634,12 @@ export async function runQuery(page, message, image = null, historyContext = nul
       const assistantEls = document.querySelectorAll('[data-message-author-role="assistant"], article [data-message-author-role="assistant"], .agent-turn');
       if (assistantEls.length > initCount) {
         const lastEl = assistantEls[assistantEls.length - 1];
-        const isGenerating = !!document.querySelector(
-          '.animate-pulse, [aria-label*="Generating" i], [aria-label*="Gerando" i], [data-testid*="image-generating"], button[data-testid="stop-button"], button[aria-label*="Stop" i], button[aria-label*="Parar" i]'
-        );
+        const stopBtn = document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop" i], button[aria-label*="Parar" i]');
+        const hasStopBtn = !!(stopBtn && !stopBtn.disabled && (stopBtn.offsetWidth > 0 || stopBtn.offsetHeight > 0));
+        const hasPulse = !!document.querySelector('.animate-pulse, [aria-label*="Generating" i], [aria-label*="Gerando" i], [data-testid*="image-generating"]');
         return {
           text: lastEl.innerText || lastEl.textContent || '',
-          isGenerating,
+          isGenerating: hasStopBtn || hasPulse,
           hasEl: true,
         };
       }
@@ -647,57 +648,60 @@ export async function runQuery(page, message, image = null, historyContext = nul
 
     if (snapshot.text && snapshot.text !== lastStreamedText) {
       lastStreamedText = snapshot.text;
+      lastChangeTime = Date.now();
       if (typeof onChunk === 'function') {
         onChunk(snapshot.text);
       }
     }
 
-    if (!snapshot.isGenerating && lastStreamedText.length > 0) {
+    // Done if not generating, or if text has stopped growing for 3 seconds
+    const textSettled = lastStreamedText.length > 0 && Date.now() - lastChangeTime > 3000;
+    if ((!snapshot.isGenerating && lastStreamedText.length > 0) || textSettled) {
       if (isImageRequest) {
-        await sleep(2500);
+        await sleep(1500);
       } else {
-        await sleep(250);
+        await sleep(150);
       }
       doneStreaming = true;
     }
   }
 
   const responseElements = await page.$$('[data-message-author-role="assistant"]');
-  if (responseElements.length === 0) throw new Error('No response element found');
-
-  const lastEl = responseElements[responseElements.length - 1];
-  const responseText = lastStreamedText || (await lastEl.innerText());
+  let lastEl = responseElements.length > 0 ? responseElements[responseElements.length - 1] : null;
+  const responseText = lastStreamedText || (lastEl ? await lastEl.innerText().catch(() => '') : '');
 
   // ── Extract generated images (DALL-E / Visual Outputs) ──────────────────────
   let extractedImages = [];
   try {
-    await sleep(800);
-    const imgElements = await lastEl.$$('img');
-    for (const imgEl of imgElements) {
-      try {
-        const isVisible = await imgEl.isVisible().catch(() => false);
-        if (!isVisible) continue;
+    if (lastEl) {
+      await sleep(500);
+      const imgElements = await lastEl.$$('img');
+      for (const imgEl of imgElements) {
+        try {
+          const isVisible = await imgEl.isVisible().catch(() => false);
+          if (!isVisible) continue;
 
-        const box = await imgEl.boundingBox().catch(() => null);
-        if (!box || box.width < 100 || box.height < 100) continue; // ignore avatars and icons
+          const box = await imgEl.boundingBox().catch(() => null);
+          if (!box || box.width < 100 || box.height < 100) continue; // ignore avatars and icons
 
-        const src = (await imgEl.getAttribute('src').catch(() => '')) || '';
-        if (src.includes('avatar') || src.includes('profile') || src.includes('icon')) continue;
+          const src = (await imgEl.getAttribute('src').catch(() => '')) || '';
+          if (src.includes('avatar') || src.includes('profile') || src.includes('icon')) continue;
 
-        const alt = (await imgEl.getAttribute('alt').catch(() => '')) || 'Imagem gerada';
+          const alt = (await imgEl.getAttribute('alt').catch(() => '')) || 'Imagem gerada';
 
-        // Direct element screenshot guarantees 100% visual capture with no CORS / CDN token expiration
-        const buffer = await imgEl.screenshot({ type: 'png' });
-        const dataUrl = `data:image/png;base64,${buffer.toString('base64')}`;
+          // Direct element screenshot guarantees 100% visual capture with no CORS / CDN token expiration
+          const buffer = await imgEl.screenshot({ type: 'png' });
+          const dataUrl = `data:image/png;base64,${buffer.toString('base64')}`;
 
-        extractedImages.push({
-          src: dataUrl,
-          dataUrl,
-          alt,
-        });
-        log(`[Session] ✓ Generated image extracted from DOM (${Math.round(box.width)}x${Math.round(box.height)}px)`);
-      } catch (singleImgErr) {
-        log(`[Session] Image capture note: ${singleImgErr.message}`);
+          extractedImages.push({
+            src: dataUrl,
+            dataUrl,
+            alt,
+          });
+          log(`[Session] ✓ Generated image extracted from DOM (${Math.round(box.width)}x${Math.round(box.height)}px)`);
+        } catch (singleImgErr) {
+          log(`[Session] Image capture note: ${singleImgErr.message}`);
+        }
       }
     }
   } catch (imgExtractErr) {

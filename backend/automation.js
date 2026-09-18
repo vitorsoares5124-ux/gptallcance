@@ -578,19 +578,12 @@ export async function runQuery(page, message, image = null, historyContext = nul
   let userText = message && message.trim() ? message : (image ? 'Descreva ou processe esta imagem' : 'Olá');
   let finalPrompt = userText;
 
-  // ── Parallel Image Generation Task if prompt asks for an image ────────────
+  // ── Image Request Detection ───────────────────────────────────────────────
   const isImageRequest = /(?:crie|gerar|gere|desenhe|desenho|faça|criar|imagem|foto|fotografia|ilustração|render|draw|generate|image|picture|retrato)/i.test(userText);
-  const parallelImagePromise = (isImageRequest && !image) ? generateAndDownloadImage(userText, log) : Promise.resolve([]);
-
-  // ── Capture assistant count BEFORE sending prompt to guarantee new turn detection
-  const initialAssistantCount = await page.evaluate(() => {
-    return document.querySelectorAll('[data-message-author-role="assistant"], article [data-message-author-role="assistant"], .agent-turn').length;
-  }).catch(() => 0);
 
   // ── Enter prompt text ─────────────────────────────────────────────────────
   await input.click();
   await sleep(200);
-
   await input.fill(finalPrompt);
   await sleep(300);
 
@@ -615,10 +608,24 @@ export async function runQuery(page, message, image = null, historyContext = nul
 
   log('[Session] Query dispatched — streaming response...');
 
-  let lastStreamedText = '';
-  let lastChangeTime = Date.now();
-  const pollStart = Date.now();
-  let doneStreaming = false;
+  // ── IMAGE REQUEST: skip ChatGPT DOM polling entirely ─────────────────────
+  // ChatGPT shows widget progress ("Finalizando 90%", "29%") and NEVER resolves
+  // cleanly via DOM scraping. We dispatch the prompt for history context, then
+  // immediately use our Flux.1 high-res generator (always ~2s, deterministic).
+  if (isImageRequest && !image) {
+    log('[ImageGen] Image request detected — using Flux.1 generator directly (skipping ChatGPT DOM)...');
+    if (typeof onChunk === 'function') {
+      onChunk('Gerando imagem em alta resolução...');
+    }
+    const generated = await generateAndDownloadImage(userText, log);
+    const responseText = 'Aqui está a imagem gerada de acordo com o seu pedido:';
+    return { text: responseText, images: generated, isLimited: false };
+  }
+
+  // ── TEXT REQUEST: poll ChatGPT DOM normally ───────────────────────────────
+  const initialAssistantCount = await page.evaluate(() => {
+    return document.querySelectorAll('[data-message-author-role="assistant"], article [data-message-author-role="assistant"], .agent-turn').length;
+  }).catch(() => 0);
 
   function cleanWidgetText(txt) {
     if (!txt) return '';
@@ -629,7 +636,11 @@ export async function runQuery(page, message, image = null, historyContext = nul
       .trim();
   }
 
-  // Poll assistant output every 60ms in-browser to stream tokens live as they arrive
+  let lastStreamedText = '';
+  let lastChangeTime = Date.now();
+  const pollStart = Date.now();
+  let doneStreaming = false;
+
   while (!doneStreaming && Date.now() - pollStart < 45000) {
     await sleep(60);
 
@@ -640,19 +651,14 @@ export async function runQuery(page, message, image = null, historyContext = nul
         const stopBtn = document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop" i], button[aria-label*="Parar" i]');
         const hasStopBtn = !!(stopBtn && !stopBtn.disabled && (stopBtn.offsetWidth > 0 || stopBtn.offsetHeight > 0));
         const hasPulse = !!document.querySelector('.animate-pulse, [aria-label*="Generating" i], [aria-label*="Gerando" i], [data-testid*="image-generating"]');
-        const imgs = Array.from(lastEl.querySelectorAll('img')).filter(img => {
-          const w = img.naturalWidth || img.offsetWidth || 0;
-          return w > 80 && !img.src.includes('avatar') && !img.src.includes('profile');
-        });
         return {
           text: lastEl.innerText || lastEl.textContent || '',
           isGenerating: hasStopBtn || hasPulse,
-          hasImages: imgs.length > 0,
           hasEl: true,
         };
       }
-      return { text: '', isGenerating: true, hasImages: false, hasEl: false };
-    }, initialAssistantCount).catch(() => ({ text: '', isGenerating: true, hasImages: false, hasEl: false }));
+      return { text: '', isGenerating: true, hasEl: false };
+    }, initialAssistantCount).catch(() => ({ text: '', isGenerating: true, hasEl: false }));
 
     const cleanedText = cleanWidgetText(snapshot.text);
 
@@ -664,23 +670,9 @@ export async function runQuery(page, message, image = null, historyContext = nul
       }
     }
 
-    // Fast-exit if image generation was requested and either ChatGPT rendered an image,
-    // or ChatGPT is stuck in widget status and > 4 seconds elapsed
-    if (isImageRequest) {
-      if (snapshot.hasImages) {
-        doneStreaming = true;
-        break;
-      }
-      if (Date.now() - pollStart > 4000) {
-        // We already have or are about to receive the parallel high-res Flux image
-        doneStreaming = true;
-        break;
-      }
-    }
-
     // Done if not generating, or if text has stopped growing for 2 seconds
     const textSettled = lastStreamedText.length > 0 && Date.now() - lastChangeTime > 2000;
-    if ((!snapshot.isGenerating && (lastStreamedText.length > 0 || snapshot.hasImages)) || textSettled) {
+    if ((!snapshot.isGenerating && lastStreamedText.length > 0) || textSettled) {
       doneStreaming = true;
     }
   }
@@ -726,15 +718,6 @@ export async function runQuery(page, message, image = null, historyContext = nul
     }
   } catch (imgExtractErr) {
     log(`[Session] Image extraction notice: ${imgExtractErr.message}`);
-  }
-
-  // ── Parallel Fallback: If prompt requested an image and ChatGPT returned text-only ──
-  if (extractedImages.length === 0 && isImageRequest) {
-    log('[Session] Awaiting parallel high-res AI image generator...');
-    const generated = await parallelImagePromise;
-    if (generated && generated.length > 0) {
-      extractedImages = generated;
-    }
   }
 
   // If we have images and text is empty or was only widget residue, provide a clean response title

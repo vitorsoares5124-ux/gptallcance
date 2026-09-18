@@ -218,22 +218,57 @@ function connectSSE() {
 
 // ─── Image Attachment & Clipboard Handling ───────────────────────────────────
 
-function handleImageSelected(file) {
+function compressImage(file, maxDimension = 1600, quality = 0.88) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxDimension || height > maxDimension) {
+          if (width > height) {
+            height = Math.round((height * maxDimension) / width);
+            width = maxDimension;
+          } else {
+            width = Math.round((width * maxDimension) / height);
+            height = maxDimension;
+          }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+
+        const mime = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+        const dataUrl = canvas.toDataURL(mime, quality);
+        resolve({
+          dataUrl,
+          name: file.name || 'image.jpg',
+          type: mime,
+        });
+      };
+      img.onerror = () => {
+        resolve({
+          dataUrl: e.target.result,
+          name: file.name || 'image.png',
+          type: file.type,
+        });
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function handleImageSelected(file) {
   if (!file || !file.type.startsWith('image/')) return;
 
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    selectedImage = {
-      dataUrl: e.target.result,
-      name: file.name || 'image.png',
-      type: file.type,
-      size: file.size,
-    };
-    previewImg.src = selectedImage.dataUrl;
-    previewContainer.classList.remove('preview-hidden');
-    input.focus();
-  };
-  reader.readAsDataURL(file);
+  const processed = await compressImage(file);
+  selectedImage = processed;
+  previewImg.src = selectedImage.dataUrl;
+  previewContainer.classList.remove('preview-hidden');
+  input.focus();
 }
 
 function clearImage() {

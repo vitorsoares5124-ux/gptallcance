@@ -16,9 +16,9 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
-// 25mb limit to support high-resolution base64 images
-app.use(express.json({ limit: '25mb' }));
-app.use(express.urlencoded({ limit: '25mb', extended: true }));
+// 50mb limit to support high-resolution base64 images
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Serve the frontend from ../frontend
 app.use(express.static(join(__dirname, '../frontend')));

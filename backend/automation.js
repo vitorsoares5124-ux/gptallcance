@@ -576,15 +576,24 @@ export async function runQuery(page, message, image = null, historyContext = nul
 
   // ── Context Injection / Prompt composition ────────────────────────────────
   let userText = message && message.trim() ? message : (image ? 'Descreva ou processe esta imagem' : 'Olá');
-  let finalPrompt = userText;
+  let finalPrompt = historyContext ? `${historyContext}\n\n[Mensagem Atual do Usuário]: ${userText}` : userText;
 
   // ── Image Request Detection ───────────────────────────────────────────────
   const isImageRequest = /(?:crie|gerar|gere|desenhe|desenho|faça|criar|imagem|foto|fotografia|ilustração|render|draw|generate|image|picture|retrato)/i.test(userText);
 
+  // Read baseline message count BEFORE typing or dispatching
+  const initialAssistantCount = await page.evaluate(() => {
+    return document.querySelectorAll('[data-message-author-role="assistant"], article [data-message-author-role="assistant"], .agent-turn').length;
+  }).catch(() => 0);
+
   // ── Enter prompt text ─────────────────────────────────────────────────────
   await input.click();
-  await sleep(200);
-  await input.fill(finalPrompt);
+  await sleep(150);
+  try {
+    await input.fill(finalPrompt);
+  } catch (_) {
+    await page.keyboard.insertText(finalPrompt);
+  }
   await sleep(300);
 
   // Send action
@@ -609,9 +618,6 @@ export async function runQuery(page, message, image = null, historyContext = nul
   log('[Session] Query dispatched — streaming response...');
 
   // ── IMAGE REQUEST: skip ChatGPT DOM polling entirely ─────────────────────
-  // ChatGPT shows widget progress ("Finalizando 90%", "29%") and NEVER resolves
-  // cleanly via DOM scraping. We dispatch the prompt for history context, then
-  // immediately use our Flux.1 high-res generator (always ~2s, deterministic).
   if (isImageRequest && !image) {
     log('[ImageGen] Image request detected — using Flux.1 generator directly (skipping ChatGPT DOM)...');
     if (typeof onChunk === 'function') {
@@ -623,10 +629,6 @@ export async function runQuery(page, message, image = null, historyContext = nul
   }
 
   // ── TEXT REQUEST: poll ChatGPT DOM normally ───────────────────────────────
-  const initialAssistantCount = await page.evaluate(() => {
-    return document.querySelectorAll('[data-message-author-role="assistant"], article [data-message-author-role="assistant"], .agent-turn').length;
-  }).catch(() => 0);
-
   function cleanWidgetText(txt) {
     if (!txt) return '';
     return txt
@@ -646,19 +648,23 @@ export async function runQuery(page, message, image = null, historyContext = nul
 
     const snapshot = await page.evaluate((initCount) => {
       const assistantEls = document.querySelectorAll('[data-message-author-role="assistant"], article [data-message-author-role="assistant"], .agent-turn');
-      if (assistantEls.length > initCount) {
+      const stopBtn = document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop" i], button[aria-label*="Parar" i]');
+      const hasStopBtn = !!(stopBtn && !stopBtn.disabled && (stopBtn.offsetWidth > 0 || stopBtn.offsetHeight > 0));
+      const hasPulse = !!document.querySelector('.animate-pulse, [aria-label*="Generating" i], [aria-label*="Gerando" i], [data-testid*="image-generating"]');
+
+      if (assistantEls.length > 0) {
         const lastEl = assistantEls[assistantEls.length - 1];
-        const stopBtn = document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop" i], button[aria-label*="Parar" i]');
-        const hasStopBtn = !!(stopBtn && !stopBtn.disabled && (stopBtn.offsetWidth > 0 || stopBtn.offsetHeight > 0));
-        const hasPulse = !!document.querySelector('.animate-pulse, [aria-label*="Generating" i], [aria-label*="Gerando" i], [data-testid*="image-generating"]');
+        const text = lastEl.innerText || lastEl.textContent || '';
         return {
-          text: lastEl.innerText || lastEl.textContent || '',
+          text,
           isGenerating: hasStopBtn || hasPulse,
           hasEl: true,
+          count: assistantEls.length,
+          isNew: assistantEls.length > initCount,
         };
       }
-      return { text: '', isGenerating: true, hasEl: false };
-    }, initialAssistantCount).catch(() => ({ text: '', isGenerating: true, hasEl: false }));
+      return { text: '', isGenerating: true, hasEl: false, count: 0, isNew: false };
+    }, initialAssistantCount).catch(() => ({ text: '', isGenerating: false, hasEl: false, count: 0, isNew: false }));
 
     const cleanedText = cleanWidgetText(snapshot.text);
 
@@ -670,9 +676,10 @@ export async function runQuery(page, message, image = null, historyContext = nul
       }
     }
 
-    // Done if not generating, or if text has stopped growing for 2 seconds
-    const textSettled = lastStreamedText.length > 0 && Date.now() - lastChangeTime > 2000;
-    if ((!snapshot.isGenerating && lastStreamedText.length > 0) || textSettled) {
+    // Done if not generating AND we have captured some text, or if text has settled for 1.8s
+    const elapsed = Date.now() - pollStart;
+    const textSettled = lastStreamedText.length > 0 && Date.now() - lastChangeTime > 1800;
+    if ((!snapshot.isGenerating && lastStreamedText.length > 0 && elapsed > 1000) || textSettled) {
       doneStreaming = true;
     }
   }

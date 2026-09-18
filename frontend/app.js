@@ -1011,13 +1011,23 @@ form.addEventListener('submit', async (e) => {
             try {
               const payload = JSON.parse(jsonStr);
               if (currentEvent === 'chunk') {
-                accumulatedText = payload.text;
-                const activeBubble = getOrCreateAiBubble();
-                activeBubble.innerHTML = parseMarkdown(accumulatedText) + '<span class="streaming-cursor"></span>';
-                scrollToBottom();
+                const chunkRaw = payload.text || '';
+                // Filter out raw tool / widget percentage text
+                const isWidgetStatus = /^(?:\s*Finalizando|\s*\d{1,3}%|\s*Criando imagem|\s*Gerando imagem|\s*Thinking|\s*Pensando)+\s*$/i.test(chunkRaw);
+                if (!isWidgetStatus && chunkRaw.length > 0) {
+                  accumulatedText = chunkRaw;
+                  const activeBubble = getOrCreateAiBubble();
+                  activeBubble.innerHTML = parseMarkdown(accumulatedText) + '<span class="streaming-cursor"></span>';
+                  scrollToBottom();
+                }
               } else if (currentEvent === 'done') {
                 finalResultData = payload;
-                accumulatedText = payload.text || accumulatedText;
+                let textResult = payload.text || accumulatedText || '';
+                const isWidgetOnly = !textResult || /^(?:\s*Finalizando|\s*\d{1,3}%|\s*Criando imagem|\s*Gerando imagem|\s*Thinking|\s*Pensando)+\s*$/i.test(textResult);
+                if (payload.images && payload.images.length > 0 && isWidgetOnly) {
+                  textResult = 'Aqui está a imagem gerada de acordo com o seu pedido:';
+                }
+                accumulatedText = textResult;
                 const activeBubble = getOrCreateAiBubble();
                 activeBubble.innerHTML = parseMarkdown(accumulatedText);
 
@@ -1038,10 +1048,14 @@ form.addEventListener('submit', async (e) => {
       }
     } else {
       const data = await response.json();
-      accumulatedText = data.text;
       finalResultData = data;
+      let textResult = data.text || '';
+      if (data.images && data.images.length > 0 && (!textResult || /^(?:\s*Finalizando|\s*\d{1,3}%|\s*Criando imagem)+\s*$/i.test(textResult))) {
+        textResult = 'Aqui está a imagem gerada de acordo com o seu pedido:';
+      }
+      accumulatedText = textResult;
       const activeBubble = getOrCreateAiBubble();
-      activeBubble.innerHTML = parseMarkdown(data.text);
+      activeBubble.innerHTML = parseMarkdown(accumulatedText);
       if (data.images && data.images.length > 0) {
         for (const genImg of data.images) {
           activeBubble.appendChild(createImageElement(genImg));
@@ -1049,11 +1063,18 @@ form.addEventListener('submit', async (e) => {
       }
     }
 
-    // Ensure cursor is removed if loop ended
+    // Ensure cursor is removed and final state is pristine
     if (bubble) {
+      removeTypingIndicator();
+      let textResult = accumulatedText;
+      const imagesList = finalResultData?.images || [];
+      if (imagesList.length > 0 && (!textResult || /^(?:\s*Finalizando|\s*\d{1,3}%|\s*Criando imagem)+\s*$/i.test(textResult))) {
+        textResult = 'Aqui está a imagem gerada de acordo com o seu pedido:';
+      }
+      accumulatedText = textResult;
       bubble.innerHTML = parseMarkdown(accumulatedText);
-      if (finalResultData?.images && finalResultData.images.length > 0) {
-        for (const genImg of finalResultData.images) {
+      if (imagesList.length > 0) {
+        for (const genImg of imagesList) {
           bubble.appendChild(createImageElement(genImg));
         }
       }

@@ -620,6 +620,15 @@ export async function runQuery(page, message, image = null, historyContext = nul
   const pollStart = Date.now();
   let doneStreaming = false;
 
+  function cleanWidgetText(txt) {
+    if (!txt) return '';
+    return txt
+      .replace(/\b(?:Finalizando|Criando imagem|Gerando imagem|Searching the web|Pesquisando|Thinking|Pensando|Finished|Creating image)\b/gi, '')
+      .replace(/\b\d{1,3}%\b/g, '')
+      .replace(/\n\s*\n+/g, '\n\n')
+      .trim();
+  }
+
   // Poll assistant output every 60ms in-browser to stream tokens live as they arrive
   while (!doneStreaming && Date.now() - pollStart < 45000) {
     await sleep(60);
@@ -631,39 +640,61 @@ export async function runQuery(page, message, image = null, historyContext = nul
         const stopBtn = document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop" i], button[aria-label*="Parar" i]');
         const hasStopBtn = !!(stopBtn && !stopBtn.disabled && (stopBtn.offsetWidth > 0 || stopBtn.offsetHeight > 0));
         const hasPulse = !!document.querySelector('.animate-pulse, [aria-label*="Generating" i], [aria-label*="Gerando" i], [data-testid*="image-generating"]');
+        const imgs = Array.from(lastEl.querySelectorAll('img')).filter(img => {
+          const w = img.naturalWidth || img.offsetWidth || 0;
+          return w > 80 && !img.src.includes('avatar') && !img.src.includes('profile');
+        });
         return {
           text: lastEl.innerText || lastEl.textContent || '',
           isGenerating: hasStopBtn || hasPulse,
+          hasImages: imgs.length > 0,
           hasEl: true,
         };
       }
-      return { text: '', isGenerating: true, hasEl: false };
-    }, initialAssistantCount).catch(() => ({ text: '', isGenerating: true, hasEl: false }));
+      return { text: '', isGenerating: true, hasImages: false, hasEl: false };
+    }, initialAssistantCount).catch(() => ({ text: '', isGenerating: true, hasImages: false, hasEl: false }));
 
-    if (snapshot.text && snapshot.text !== lastStreamedText) {
-      lastStreamedText = snapshot.text;
+    const cleanedText = cleanWidgetText(snapshot.text);
+
+    if (cleanedText && cleanedText !== lastStreamedText) {
+      lastStreamedText = cleanedText;
       lastChangeTime = Date.now();
       if (typeof onChunk === 'function') {
-        onChunk(snapshot.text);
+        onChunk(cleanedText);
       }
     }
 
-    // Done if not generating, or if text has stopped growing for 2.5 seconds
-    const textSettled = lastStreamedText.length > 0 && Date.now() - lastChangeTime > 2500;
-    if ((!snapshot.isGenerating && lastStreamedText.length > 0) || textSettled) {
+    // Fast-exit if image generation was requested and either ChatGPT rendered an image,
+    // or ChatGPT is stuck in widget status and > 4 seconds elapsed
+    if (isImageRequest) {
+      if (snapshot.hasImages) {
+        doneStreaming = true;
+        break;
+      }
+      if (Date.now() - pollStart > 4000) {
+        // We already have or are about to receive the parallel high-res Flux image
+        doneStreaming = true;
+        break;
+      }
+    }
+
+    // Done if not generating, or if text has stopped growing for 2 seconds
+    const textSettled = lastStreamedText.length > 0 && Date.now() - lastChangeTime > 2000;
+    if ((!snapshot.isGenerating && (lastStreamedText.length > 0 || snapshot.hasImages)) || textSettled) {
       doneStreaming = true;
     }
   }
 
   const responseElements = await page.$$('[data-message-author-role="assistant"]');
   let lastEl = responseElements.length > 0 ? responseElements[responseElements.length - 1] : null;
-  const responseText = lastStreamedText || (lastEl ? await lastEl.innerText().catch(() => '') : '');
+  let rawText = lastStreamedText || (lastEl ? await lastEl.innerText().catch(() => '') : '');
+  let responseText = cleanWidgetText(rawText);
 
   // ── Extract generated images (DALL-E / Visual Outputs) ──────────────────────
   let extractedImages = [];
   try {
     if (lastEl) {
-      await sleep(500);
+      await sleep(300);
       const imgElements = await lastEl.$$('img');
       for (const imgEl of imgElements) {
         try {
@@ -671,7 +702,7 @@ export async function runQuery(page, message, image = null, historyContext = nul
           if (!isVisible) continue;
 
           const box = await imgEl.boundingBox().catch(() => null);
-          if (!box || box.width < 100 || box.height < 100) continue; // ignore avatars and icons
+          if (!box || box.width < 80 || box.height < 80) continue; // ignore avatars and icons
 
           const src = (await imgEl.getAttribute('src').catch(() => '')) || '';
           if (src.includes('avatar') || src.includes('profile') || src.includes('icon')) continue;
@@ -704,6 +735,11 @@ export async function runQuery(page, message, image = null, historyContext = nul
     if (generated && generated.length > 0) {
       extractedImages = generated;
     }
+  }
+
+  // If we have images and text is empty or was only widget residue, provide a clean response title
+  if (extractedImages.length > 0 && (!responseText || responseText.length < 3)) {
+    responseText = 'Aqui está a imagem gerada de acordo com o seu pedido:';
   }
 
   // Detect quota exhaustion signals

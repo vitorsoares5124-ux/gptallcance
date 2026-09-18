@@ -1,5 +1,5 @@
 // server.js
-// AllcanceAI backend — Express server with Image Support
+// AllcanceAI backend — Express server with Image Support & Fast Boot
 // Endpoints:
 //   POST /chat          → send a message (and optional image), returns AI response + images
 //   GET  /status        → current pool status (JSON)
@@ -82,16 +82,19 @@ async function main() {
   console.log('  ╚═══════════════════════════╝');
   console.log('');
 
-  try {
-    await initialize();
-  } catch (err) {
-    console.error('[Server] Initialization failed:', err.message);
-    process.exit(1);
-  }
-
+  // 1. Start HTTP server immediately so localhost:3000 responds instantly
   app.listen(PORT, () => {
     console.log(`\n  ✓ Running at http://localhost:${PORT}\n`);
   });
+
+  // 2. Initialize the browser account pool in the background
+  try {
+    initialize().catch((err) => {
+      console.error('[Server] Pool initialization warning:', err.message);
+    });
+  } catch (err) {
+    console.error('[Server] Pool initialization error:', err.message);
+  }
 }
 
 main();

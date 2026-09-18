@@ -695,13 +695,22 @@ export async function runQuery(page, message, image = null, historyContext = nul
           dataUrl,
           alt,
         });
-        log(`[Session] ✓ Generated image extracted successfully (${Math.round(box.width)}x${Math.round(box.height)}px)`);
+        log(`[Session] ✓ Generated image extracted from DOM (${Math.round(box.width)}x${Math.round(box.height)}px)`);
       } catch (singleImgErr) {
         log(`[Session] Image capture note: ${singleImgErr.message}`);
       }
     }
   } catch (imgExtractErr) {
     log(`[Session] Image extraction notice: ${imgExtractErr.message}`);
+  }
+
+  // ── Fallback: If prompt requested an image and ChatGPT returned text-only ──
+  if (extractedImages.length === 0 && isImageRequest) {
+    log('[Session] Triggering high-res AI image generator for requested prompt...');
+    const generated = await generateAndDownloadImage(userText, log);
+    if (generated.length > 0) {
+      extractedImages = generated;
+    }
   }
 
   // Detect quota exhaustion signals
@@ -714,6 +723,53 @@ export async function runQuery(page, message, image = null, historyContext = nul
   if (quotaHit) log('[Session] ⚠ Quota signal detected in response');
 
   return { text: responseText, images: extractedImages, isLimited: quotaHit };
+}
+
+/**
+ * Generates and downloads a hyper-realistic AI image directly in high resolution.
+ */
+export async function generateAndDownloadImage(prompt, log = console.log) {
+  try {
+    let cleanPrompt = prompt
+      .replace(/\[INSTRUÇÃO DO SISTEMA:[^\]]+\]/gi, '')
+      .replace(/\[Mensagem Atual do Usuário\]:/gi, '')
+      .replace(/crie uma imagem (?:hiperrealista|realista|de|pra mim, de)?/gi, '')
+      .replace(/gere uma imagem (?:hiperrealista|realista|de)?/gi, '')
+      .replace(/desenhe (?:uma imagem de)?/gi, '')
+      .replace(/faça uma imagem (?:de)?/gi, '')
+      .trim();
+
+    if (!cleanPrompt) cleanPrompt = prompt;
+
+    log(`[ImageGen] Generating high-resolution image via Flux engine: "${cleanPrompt.slice(0, 70)}..."`);
+
+    const seed = Math.floor(Math.random() * 1000000);
+    const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(cleanPrompt)}?width=1024&height=1024&nologo=true&model=flux&seed=${seed}`;
+
+    const res = await fetch(imageUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      },
+    });
+
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    const arrayBuffer = await res.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    const base64 = buffer.toString('base64');
+    const dataUrl = `data:image/jpeg;base64,${base64}`;
+
+    log(`[ImageGen] ✓ Image successfully generated & downloaded (${Math.round(buffer.byteLength / 1024)} KB)`);
+
+    return [{
+      src: dataUrl,
+      dataUrl,
+      alt: cleanPrompt,
+    }];
+  } catch (err) {
+    log(`[ImageGen] ⚠ Image generator note: ${err.message}`);
+    return [];
+  }
 }
 
 // Legacy aliases

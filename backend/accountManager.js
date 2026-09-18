@@ -1,48 +1,14 @@
 // sessionPool.js (accountManager.js)
 // Manages a warm pool of browser sessions with transparent rotation,
-// session persistence across restarts, and context injection across account switches.
+// session persistence across restarts, and per-conversation context injection.
 
 import { EventEmitter } from 'events';
 import { resumeOrCreateSession, runQuery } from './automation.js';
-import fs from 'fs';
-import path from 'path';
 
 export const events = new EventEmitter();
 
-const HISTORY_DIR = path.join(process.cwd(), 'history');
-const HISTORY_FILE = path.join(HISTORY_DIR, 'conversation.json');
-
-function ensureHistoryDir() {
-  if (!fs.existsSync(HISTORY_DIR)) {
-    fs.mkdirSync(HISTORY_DIR, { recursive: true });
-  }
-}
-
-// In-memory conversation history persisted to disk
-let conversationHistory = [];
-
-function loadHistory() {
-  ensureHistoryDir();
-  if (fs.existsSync(HISTORY_FILE)) {
-    try {
-      conversationHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
-    } catch (_) {
-      conversationHistory = [];
-    }
-  }
-}
-
-function saveHistory() {
-  ensureHistoryDir();
-  try {
-    // Keep last 40 turns of history to prevent token overflow while maintaining deep context
-    const trimmed = conversationHistory.slice(-40);
-    fs.writeFileSync(HISTORY_FILE, JSON.stringify(trimmed, null, 2));
-  } catch (_) {}
-}
-
 const pool = {
-  active:  null,   // { id, email, page, context, browser, msgCount, isFresh, createdAt }
+  active:  null,   // { id, email, page, context, browser, msgCount, isFresh, currentConversationId, createdAt }
   standby: null,
 };
 
@@ -80,7 +46,8 @@ async function provisionSlot(role) {
       context:   result.context,
       browser:   result.browser,
       msgCount:  0,
-      isFresh:   !result.isResumed, // If resumed, ChatGPT already has the thread
+      isFresh:   !result.isResumed,
+      currentConversationId: null,
       createdAt: new Date().toISOString(),
     };
 
@@ -117,6 +84,7 @@ async function rotate() {
   pool.active  = pool.standby;
   // Brand new promoted session must receive context injection on its first prompt
   pool.active.isFresh = true;
+  pool.active.currentConversationId = null;
   pool.standby = null;
 
   log(`[Pool] Rotated. Primary: ${pool.active.email}`);
@@ -135,67 +103,60 @@ function sleep(ms) {
  * Boot the pool. Resumes active session or provisions fresh.
  */
 export async function initialize() {
-  log('[Pool] Initializing with Session & History Persistence...');
-  loadHistory();
+  log('[Pool] Initializing with Per-Conversation Context Injection...');
   await provisionSlot('active');
   setTimeout(() => provisionSlot('standby'), 12000);
 }
 
 /**
- * Send a query (text + optional image). Transparently injects context on fresh accounts.
+ * Send a query (text + optional image) with per-conversation context injection.
  * @param {string} message - User text prompt
  * @param {object|string|null} image - Base64 image or { dataUrl, filename }
+ * @param {string|null} conversationId - Current active conversation ID
+ * @param {Array} history - Prior messages in this specific conversation
  */
-export async function chat(message, image = null) {
+export async function chat(message, image = null, conversationId = null, history = []) {
   if (!pool.active) throw new Error('Pool not ready');
 
   const session = pool.active;
-  log(`[Pool] Query via ${session.email} (#${session.msgCount + 1})${image ? ' [image]' : ''}`);
+  log(`[Pool] Query via ${session.email} (#${session.msgCount + 1}) [Conv: ${conversationId || 'default'}]`);
 
-  // ── Prepare Context Injection if this account is fresh and we have history ──
+  // ── Prepare Context Injection if this account is fresh or switched conversation ──
   let historyContext = null;
-  if (session.isFresh && conversationHistory.length > 0) {
-    const formattedLines = conversationHistory.slice(-20).map((turn) => {
-      const prefix = turn.role === 'user' ? 'Usuário' : 'Assistente';
-      return `${prefix}: ${turn.text}`;
-    });
+  const needsContext = (session.isFresh || session.currentConversationId !== conversationId) && history && history.length > 1;
 
-    historyContext = `[INSTRUÇÃO DO SISTEMA: Esta é a continuação direta de uma conversa prévia. Mantenha 100% da continuidade de contexto, fatos citados e tom de resposta das mensagens anteriores.]\n\n--- HISTÓRICO RECENTE ---\n${formattedLines.join('\n\n')}\n--- FIM DO HISTÓRICO ---`;
-    log(`[Pool] Context injection active (${conversationHistory.length} turns in memory)`);
+  if (needsContext) {
+    // Take previous turns (excluding the current user message)
+    const previousTurns = history.slice(0, -1).slice(-16);
+    if (previousTurns.length > 0) {
+      const formattedLines = previousTurns.map((turn) => {
+        const prefix = turn.role === 'user' ? 'Usuário' : 'Assistente';
+        return `${prefix}: ${turn.text}`;
+      });
+
+      historyContext = `[INSTRUÇÃO DO SISTEMA: Esta é a continuação direta de uma conversa prévia específica. Mantenha 100% da continuidade de contexto, dados e tom de resposta das mensagens anteriores.]\n\n--- HISTÓRICO RECENTE DESTE CHAT ---\n${formattedLines.join('\n\n')}\n--- FIM DO HISTÓRICO ---`;
+      log(`[Pool] Injecting context for conversation ${conversationId} (${previousTurns.length} previous turns)`);
+    }
   }
 
   const result = await runQuery(session.page, message, image, historyContext, log);
   session.msgCount++;
-  session.isFresh = false; // Next prompts in this session will use ChatGPT's live thread
+  session.isFresh = false;
+  session.currentConversationId = conversationId;
 
   if (result.isLimited) {
     log('[Pool] Quota hit — rotating...');
     await rotate();
     log('[Pool] Retrying query with new session (Context Injection will carry history)...');
-    return await chat(message, image);
+    return await chat(message, image, conversationId, history);
   }
-
-  // Record into persistent history
-  conversationHistory.push({
-    role: 'user',
-    text: message || (image ? '[Imagem enviada]' : ''),
-    hasImage: !!image,
-    timestamp: new Date().toISOString(),
-  });
-
-  conversationHistory.push({
-    role: 'assistant',
-    text: result.text,
-    timestamp: new Date().toISOString(),
-  });
-
-  saveHistory();
 
   return {
     text: result.text,
     images: result.images || [],
     account: session.email,
     msgCount: session.msgCount,
+    conversationId,
   };
 }
 
@@ -207,6 +168,5 @@ export function getStatus() {
     active:          pool.active  ? { email: pool.active.email,  msgCount: pool.active.msgCount } : null,
     standby:         pool.standby ? { email: pool.standby.email } : null,
     creatingStandby: isProvisioning,
-    historyCount:    conversationHistory.length,
   };
 }

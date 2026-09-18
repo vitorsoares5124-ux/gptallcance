@@ -59,13 +59,13 @@ app.get('/status', (req, res) => {
 });
 
 app.post('/chat', async (req, res) => {
-  const { message, image } = req.body;
+  const { message, image, conversationId, history } = req.body;
   if ((!message || typeof message !== 'string' || !message.trim()) && !image) {
     return res.status(400).json({ error: 'message or image is required' });
   }
 
   try {
-    const result = await chat((message || '').trim(), image || null);
+    const result = await chat((message || '').trim(), image || null, conversationId || null, history || []);
     res.json(result);
   } catch (err) {
     console.error('[Server] Chat error:', err.message);

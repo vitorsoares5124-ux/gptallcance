@@ -1,9 +1,8 @@
-// app.js — AllcanceAI frontend logic with Supabase Auth & Image Support
+// app.js — AllcanceAI frontend logic with Multi-Conversation History & Supabase Auth
 
 const SUPABASE_URL  = 'https://wlwnjhwgaygfjkxayyjc.supabase.co';
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Indsd25qaHdnYXlnZmpreGF5eWpjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk3MTQyNzcsImV4cCI6MjEwNTI5MDI3N30.yJ40at7zGlDcXlat0XeNpy0CBkKPrwoAHcuv2S3sPv4';
 
-// Initialize Supabase Client
 const supabase = window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON) : null;
 
 // API endpoint configuration (supports Localhost, Vercel & Custom Tunnel/VPS)
@@ -22,63 +21,79 @@ let API = getApiEndpoint();
 // ─── DOM refs ────────────────────────────────────────────────────────────────
 
 // Auth elements
-const authScreen      = document.getElementById('auth-screen');
-const authForm        = document.getElementById('auth-form');
-const authEmail       = document.getElementById('auth-email');
-const authPassword    = document.getElementById('auth-password');
-const authError       = document.getElementById('auth-error');
-const authSubmitBtn   = document.getElementById('auth-submit-btn');
-const authBtnText     = document.getElementById('auth-btn-text');
-const authBtnSpinner  = document.getElementById('auth-btn-spinner');
+const authScreen       = document.getElementById('auth-screen');
+const authForm         = document.getElementById('auth-form');
+const authEmail        = document.getElementById('auth-email');
+const authPassword     = document.getElementById('auth-password');
+const authError        = document.getElementById('auth-error');
+const authSubmitBtn    = document.getElementById('auth-submit-btn');
+const authBtnText      = document.getElementById('auth-btn-text');
+const authBtnSpinner   = document.getElementById('auth-btn-spinner');
 
 // App elements
-const appContainer    = document.getElementById('app-container');
-const userEmailEl     = document.getElementById('user-email');
-const logoutBtn       = document.getElementById('logout-btn');
+const appContainer     = document.getElementById('app-container');
+const userEmailEl      = document.getElementById('user-email');
+const sidebarUserEmail = document.getElementById('sidebar-user-email');
+const logoutBtn        = document.getElementById('logout-btn');
 
-const messagesEl      = document.getElementById('messages');
-const emptyState      = document.getElementById('empty-state');
-const form            = document.getElementById('chat-form');
-const input           = document.getElementById('chat-input');
-const sendBtn         = document.getElementById('send-btn');
-const attachBtn       = document.getElementById('attach-btn');
-const fileInput       = document.getElementById('file-input');
-const previewContainer= document.getElementById('image-preview-container');
-const previewImg      = document.getElementById('preview-img');
-const removeImgBtn    = document.getElementById('remove-img-btn');
-const statusDot       = document.getElementById('status-dot');
-const statusLabel     = document.getElementById('status-label');
+// Sidebar elements
+const chatSidebar      = document.getElementById('chat-sidebar');
+const toggleSidebarBtn = document.getElementById('toggle-sidebar-btn');
+const sidebarBackdrop  = document.getElementById('sidebar-backdrop');
+const newChatBtn       = document.getElementById('new-chat-btn');
+const conversationsList= document.getElementById('conversations-list');
+
+// Chat area elements
+const messagesEl       = document.getElementById('messages');
+const emptyState       = document.getElementById('empty-state');
+const form             = document.getElementById('chat-form');
+const input            = document.getElementById('chat-input');
+const sendBtn          = document.getElementById('send-btn');
+const attachBtn        = document.getElementById('attach-btn');
+const fileInput        = document.getElementById('file-input');
+const previewContainer = document.getElementById('image-preview-container');
+const previewImg       = document.getElementById('preview-img');
+const removeImgBtn     = document.getElementById('remove-img-btn');
+const statusDot        = document.getElementById('status-dot');
+const statusLabel      = document.getElementById('status-label');
 
 // Lightbox modal refs
-const imageModal      = document.getElementById('image-modal');
-const modalImg        = document.getElementById('modal-img');
-const modalClose      = document.getElementById('modal-close');
-const modalBackdrop   = document.getElementById('modal-backdrop');
+const imageModal       = document.getElementById('image-modal');
+const modalImg         = document.getElementById('modal-img');
+const modalClose       = document.getElementById('modal-close');
+const modalBackdrop    = document.getElementById('modal-backdrop');
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
 let currentSession = null;
+let currentUserId = 'anonymous';
 let isSending = false;
 let selectedImage = null; // { dataUrl, name, size, type }
 let eventSourceInstance = null;
+
+// Multi-chat state
+let conversations = []; // [ { id, title, createdAt, updatedAt, messages: [] } ]
+let activeConversationId = null;
 
 // ─── Supabase Authentication ─────────────────────────────────────────────────
 
 async function initAuth() {
   if (!supabase) {
-    showApp({ user: { email: 'admin@allcance.ai' } });
+    showApp({ user: { id: 'local_user', email: 'admin@allcance.ai' } });
     return;
   }
 
-  // Check current session
-  const { data: { session } } = await supabase.auth.getSession();
-  if (session) {
-    showApp(session);
-  } else {
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (session) {
+      showApp(session);
+    } else {
+      showAuth();
+    }
+  } catch (_) {
     showAuth();
   }
 
-  // Listen for auth state changes
   supabase.auth.onAuthStateChange((_event, session) => {
     if (session) {
       showApp(session);
@@ -100,18 +115,19 @@ function showAuth() {
 
 function showApp(session) {
   currentSession = session;
+  currentUserId = session?.user?.id || 'anonymous';
   authScreen.classList.add('auth-hidden');
   appContainer.classList.remove('app-hidden');
 
-  if (session?.user?.email) {
-    userEmailEl.textContent = session.user.email;
-  }
+  const email = session?.user?.email || 'Usuário';
+  if (userEmailEl) userEmailEl.textContent = email;
+  if (sidebarUserEmail) sidebarUserEmail.textContent = email;
 
+  loadConversations();
   connectSSE();
   input.focus();
 }
 
-// Login form submission
 authForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   authError.classList.add('auth-hidden');
@@ -122,7 +138,6 @@ authForm.addEventListener('submit', async (e) => {
 
   if (!email || !password) return;
 
-  // Show loading
   authSubmitBtn.disabled = true;
   authBtnText.classList.add('auth-hidden');
   authBtnSpinner.classList.remove('auth-hidden');
@@ -133,14 +148,11 @@ authForm.addEventListener('submit', async (e) => {
       password,
     });
 
-    if (error) {
-      throw error;
-    }
-
+    if (error) throw error;
     showApp(data.session);
   } catch (err) {
     authError.textContent = err.message === 'Invalid login credentials'
-      ? 'E-mail ou senha incorretos. Verifique suas credenciais.'
+      ? 'E-mail ou senha incorretos.'
       : (err.message || 'Erro ao realizar login.');
     authError.classList.remove('auth-hidden');
   } finally {
@@ -150,7 +162,6 @@ authForm.addEventListener('submit', async (e) => {
   }
 });
 
-// Logout
 logoutBtn.addEventListener('click', async () => {
   if (supabase) {
     await supabase.auth.signOut();
@@ -158,54 +169,174 @@ logoutBtn.addEventListener('click', async () => {
   showAuth();
 });
 
+// ─── Multi-Conversation Storage & Manager ────────────────────────────────────
+
+function getStorageKey() {
+  return `allcance_conversations_${currentUserId}`;
+}
+
+function loadConversations() {
+  try {
+    const data = localStorage.getItem(getStorageKey());
+    conversations = data ? JSON.parse(data) : [];
+  } catch (_) {
+    conversations = [];
+  }
+
+  // If there are existing conversations, activate the most recent one
+  if (conversations.length > 0) {
+    switchToConversation(conversations[0].id);
+  } else {
+    startNewChat();
+  }
+  renderConversationsList();
+}
+
+function saveConversations() {
+  try {
+    localStorage.setItem(getStorageKey(), JSON.stringify(conversations));
+  } catch (_) {}
+  renderConversationsList();
+}
+
+function startNewChat() {
+  activeConversationId = null;
+  messagesEl.innerHTML = '';
+  emptyState.setAttribute('aria-hidden', 'false');
+  clearImage();
+  renderConversationsList();
+  input.focus();
+
+  // Close sidebar on mobile
+  if (window.innerWidth <= 768) {
+    appContainer.classList.remove('sidebar-mobile-open');
+  }
+}
+
+function switchToConversation(id) {
+  const conv = conversations.find(c => c.id === id);
+  if (!conv) return;
+
+  activeConversationId = id;
+  messagesEl.innerHTML = '';
+  emptyState.setAttribute('aria-hidden', 'true');
+
+  for (const msg of conv.messages) {
+    renderMessageInDOM(msg.role, msg.text, msg.imageAttachment, msg.generatedImages);
+  }
+
+  renderConversationsList();
+  scrollToBottom();
+
+  if (window.innerWidth <= 768) {
+    appContainer.classList.remove('sidebar-mobile-open');
+  }
+  input.focus();
+}
+
+function deleteConversation(e, id) {
+  e.stopPropagation();
+  conversations = conversations.filter(c => c.id !== id);
+  saveConversations();
+
+  if (activeConversationId === id) {
+    if (conversations.length > 0) {
+      switchToConversation(conversations[0].id);
+    } else {
+      startNewChat();
+    }
+  }
+}
+
+function renderConversationsList() {
+  if (!conversationsList) return;
+  conversationsList.innerHTML = '';
+
+  if (conversations.length === 0) {
+    const emptyMsg = document.createElement('div');
+    emptyMsg.style.padding = '12px 10px';
+    emptyMsg.style.fontSize = '12px';
+    emptyMsg.style.color = 'rgba(255,255,255,0.3)';
+    emptyMsg.textContent = 'Nenhuma conversa salva';
+    conversationsList.appendChild(emptyMsg);
+    return;
+  }
+
+  for (const conv of conversations) {
+    const item = document.createElement('div');
+    item.className = `conversation-item ${conv.id === activeConversationId ? 'active' : ''}`;
+    item.addEventListener('click', () => switchToConversation(conv.id));
+
+    const titleSpan = document.createElement('span');
+    titleSpan.className = 'conversation-title-text';
+    titleSpan.textContent = conv.title || 'Conversa';
+
+    const delBtn = document.createElement('button');
+    delBtn.className = 'conversation-delete-btn';
+    delBtn.title = 'Excluir conversa';
+    delBtn.innerHTML = `
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="3 6 5 6 21 6"></polyline>
+        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+      </svg>
+    `;
+    delBtn.addEventListener('click', (e) => deleteConversation(e, conv.id));
+
+    item.appendChild(titleSpan);
+    item.appendChild(delBtn);
+    conversationsList.appendChild(item);
+  }
+}
+
+// Sidebar toggle buttons
+newChatBtn.addEventListener('click', startNewChat);
+
+toggleSidebarBtn.addEventListener('click', () => {
+  if (window.innerWidth <= 768) {
+    appContainer.classList.toggle('sidebar-mobile-open');
+  } else {
+    appContainer.classList.toggle('sidebar-closed');
+  }
+});
+
+sidebarBackdrop.addEventListener('click', () => {
+  appContainer.classList.remove('sidebar-mobile-open');
+});
+
 // ─── Status (SSE) ────────────────────────────────────────────────────────────
 
 function updateStatus(status) {
-  const dot = statusDot;
-  const label = statusLabel;
+  if (!statusDot || !statusLabel) return;
 
   if (!status.active && !status.creatingStandby) {
-    dot.className = 'status-dot error';
-    label.textContent = 'Offline';
+    statusDot.className = 'status-dot error';
+    statusLabel.textContent = 'Offline';
     return;
   }
 
   if (status.active) {
-    if (status.standby) {
-      dot.className = 'status-dot active';
-      label.textContent = 'Pronto';
-    } else if (status.creatingStandby) {
-      dot.className = 'status-dot active';
-      label.textContent = 'Pronto · preparando reserva';
-    } else {
-      dot.className = 'status-dot active';
-      label.textContent = 'Pronto';
-    }
+    statusDot.className = 'status-dot active';
+    statusLabel.textContent = status.standby ? 'Pronto' : 'Pronto · preparando reserva';
   } else {
-    dot.className = 'status-dot creating';
-    label.textContent = 'Inicializando...';
+    statusDot.className = 'status-dot creating';
+    statusLabel.textContent = 'Inicializando...';
   }
 }
 
 function handleRotating() {
-  statusDot.className = 'status-dot rotating';
-  statusLabel.textContent = 'Trocando conta...';
+  if (statusDot) statusDot.className = 'status-dot rotating';
+  if (statusLabel) statusLabel.textContent = 'Trocando conta...';
   addRotationNotice();
 }
 
 function connectSSE() {
-  if (eventSourceInstance) {
-    eventSourceInstance.close();
-  }
+  if (eventSourceInstance) eventSourceInstance.close();
 
   try {
     eventSourceInstance = new EventSource(`${API}/status/stream`);
 
     eventSourceInstance.addEventListener('status', (e) => {
-      try {
-        const status = JSON.parse(e.data);
-        updateStatus(status);
-      } catch (_) {}
+      try { updateStatus(JSON.parse(e.data)); } catch (_) {}
     });
 
     eventSourceInstance.addEventListener('log', (e) => {
@@ -218,13 +349,13 @@ function connectSSE() {
     });
 
     eventSourceInstance.onerror = () => {
-      statusDot.className = 'status-dot error';
-      statusLabel.textContent = 'Reconectando...';
+      if (statusDot) statusDot.className = 'status-dot error';
+      if (statusLabel) statusLabel.textContent = 'Reconectando...';
     };
   } catch (_) {}
 }
 
-// ─── Image Attachment & Clipboard Handling ───────────────────────────────────
+// ─── Image Attachment & Compression ──────────────────────────────────────────
 
 function compressImage(file, maxDimension = 1600, quality = 0.88) {
   return new Promise((resolve) => {
@@ -286,9 +417,7 @@ function clearImage() {
   fileInput.value = '';
 }
 
-attachBtn.addEventListener('click', () => {
-  fileInput.click();
-});
+attachBtn.addEventListener('click', () => fileInput.click());
 
 fileInput.addEventListener('change', (e) => {
   if (e.target.files && e.target.files[0]) {
@@ -298,7 +427,6 @@ fileInput.addEventListener('change', (e) => {
 
 removeImgBtn.addEventListener('click', clearImage);
 
-// Paste screenshot directly (Ctrl+V)
 window.addEventListener('paste', (e) => {
   if (!currentSession) return;
   const items = e.clipboardData?.items;
@@ -315,7 +443,6 @@ window.addEventListener('paste', (e) => {
   }
 });
 
-// Drag & Drop
 window.addEventListener('dragover', (e) => e.preventDefault());
 window.addEventListener('drop', (e) => {
   if (!currentSession) return;
@@ -367,27 +494,18 @@ function parseMarkdown(text) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
 
-  // Code blocks
   html = html.replace(/```[\w]*\n?([\s\S]*?)```/g, (_, code) =>
     `<pre><code>${code.trim()}</code></pre>`
   );
 
-  // Inline code
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-
-  // Headings
   html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
   html = html.replace(/^## (.+)$/gm,  '<h2>$1</h2>');
   html = html.replace(/^# (.+)$/gm,   '<h1>$1</h1>');
-
-  // Bold & italic
   html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   html = html.replace(/\*([^*]+)\*/g,     '<em>$1</em>');
-
-  // Horizontal rule
   html = html.replace(/^---+$/gm, '<hr>');
 
-  // Unordered lists
   html = html.replace(/((?:^[•\-\*] .+\n?)+)/gm, (block) => {
     const items = block.trim().split('\n').map(line =>
       `<li>${line.replace(/^[•\-\*] /, '')}</li>`
@@ -395,7 +513,6 @@ function parseMarkdown(text) {
     return `<ul>${items}</ul>`;
   });
 
-  // Ordered lists
   html = html.replace(/((?:^\d+\. .+\n?)+)/gm, (block) => {
     const items = block.trim().split('\n').map(line =>
       `<li>${line.replace(/^\d+\. /, '')}</li>`
@@ -403,10 +520,8 @@ function parseMarkdown(text) {
     return `<ol>${items}</ol>`;
   });
 
-  // Links
   html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
 
-  // Paragraphs
   html = html.replace(/^(?!<[houplais]|<pre|<hr)(.+)$/gm, (line) => {
     if (line.trim()) return `<p>${line}</p>`;
     return '';
@@ -415,7 +530,7 @@ function parseMarkdown(text) {
   return html;
 }
 
-function addMessage(role, text, imageAttachment = null, generatedImages = []) {
+function renderMessageInDOM(role, text, imageAttachment = null, generatedImages = []) {
   emptyState.setAttribute('aria-hidden', 'true');
 
   const el = document.createElement('div');
@@ -493,7 +608,7 @@ function removeTypingIndicator() {
 function addRotationNotice() {
   const el = document.createElement('div');
   el.className = 'message rotation-notice';
-  el.textContent = 'conta renovada';
+  el.textContent = 'conta renovada · contexto preservado';
   messagesEl.appendChild(el);
 }
 
@@ -504,7 +619,7 @@ function scrollToBottom() {
   });
 }
 
-// ─── Send ─────────────────────────────────────────────────────────────────────
+// ─── Send Form Handler ────────────────────────────────────────────────────────
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -521,16 +636,51 @@ form.addEventListener('submit', async (e) => {
   input.style.height = 'auto';
   clearImage();
 
-  addMessage('user', message, currentImage);
+  // If there's no active conversation, create one now
+  let conv = conversations.find(c => c.id === activeConversationId);
+  if (!conv) {
+    const newId = `conv_${Date.now()}`;
+    const autoTitle = (message || 'Análise de imagem').slice(0, 28);
+    conv = {
+      id: newId,
+      title: autoTitle,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [],
+    };
+    conversations.unshift(conv);
+    activeConversationId = newId;
+    saveConversations();
+  }
+
+  // Add user message to state and UI
+  const userMsgObj = {
+    role: 'user',
+    text: message,
+    imageAttachment: currentImage ? currentImage.dataUrl : null,
+    timestamp: new Date().toISOString(),
+  };
+
+  conv.messages.push(userMsgObj);
+  conv.updatedAt = new Date().toISOString();
+  saveConversations();
+
+  renderMessageInDOM('user', message, currentImage);
   addTypingIndicator();
+
+  // Extract recent conversation history to send to backend for context injection
+  const historyPayload = conv.messages.slice(-15).map(m => ({
+    role: m.role,
+    text: m.text || (m.imageAttachment ? '[Imagem enviada]' : ''),
+  }));
 
   try {
     const headers = { 'Content-Type': 'application/json' };
     if (currentSession?.access_token) {
       headers['Authorization'] = `Bearer ${currentSession.access_token}`;
     }
-    if (currentSession?.user?.id) {
-      headers['X-User-Id'] = currentSession.user.id;
+    if (currentUserId) {
+      headers['X-User-Id'] = currentUserId;
     }
 
     const res = await fetch(`${API}/chat`, {
@@ -539,6 +689,8 @@ form.addEventListener('submit', async (e) => {
       body: JSON.stringify({
         message,
         image: currentImage ? currentImage.dataUrl : null,
+        conversationId: activeConversationId,
+        history: historyPayload,
       }),
     });
 
@@ -549,11 +701,23 @@ form.addEventListener('submit', async (e) => {
 
     const data = await res.json();
     removeTypingIndicator();
-    addMessage('ai', data.text, null, data.images || []);
+
+    const aiMsgObj = {
+      role: 'ai',
+      text: data.text,
+      generatedImages: data.images || [],
+      timestamp: new Date().toISOString(),
+    };
+
+    conv.messages.push(aiMsgObj);
+    conv.updatedAt = new Date().toISOString();
+    saveConversations();
+
+    renderMessageInDOM('ai', data.text, null, data.images || []);
 
   } catch (err) {
     removeTypingIndicator();
-    addMessage('ai', `Erro: ${err.message}`);
+    renderMessageInDOM('ai', `Erro: ${err.message}`);
   } finally {
     isSending = false;
     sendBtn.disabled = false;
@@ -561,6 +725,9 @@ form.addEventListener('submit', async (e) => {
   }
 });
 
-// ─── Init Auth ────────────────────────────────────────────────────────────────
+// ─── Init Auth on DOM ready ───────────────────────────────────────────────────
 
-initAuth();
+document.addEventListener('DOMContentLoaded', initAuth);
+if (document.readyState !== 'loading') {
+  initAuth();
+}

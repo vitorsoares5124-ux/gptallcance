@@ -617,50 +617,46 @@ export async function runQuery(page, message, image = null, historyContext = nul
 
   log('[Session] Query dispatched — streaming response...');
 
-  const initialAssistantCount = (await page.$$('[data-message-author-role="assistant"]')).length;
+  const initialAssistantCount = await page.evaluate(() => {
+    return document.querySelectorAll('[data-message-author-role="assistant"], article [data-message-author-role="assistant"], .agent-turn').length;
+  }).catch(() => 0);
 
   let lastStreamedText = '';
   const pollStart = Date.now();
   let doneStreaming = false;
 
-  // Poll assistant output every 120ms to stream chunks live to the user
+  // Poll assistant output every 60ms in-browser to stream tokens live as they arrive
   while (!doneStreaming && Date.now() - pollStart < 120000) {
-    await sleep(120);
+    await sleep(60);
 
-    const assistantEls = await page.$$('[data-message-author-role="assistant"]');
-    if (assistantEls.length > initialAssistantCount) {
-      const currentEl = assistantEls[assistantEls.length - 1];
-      const text = await currentEl.innerText().catch(() => '');
+    const snapshot = await page.evaluate((initCount) => {
+      const assistantEls = document.querySelectorAll('[data-message-author-role="assistant"], article [data-message-author-role="assistant"], .agent-turn');
+      if (assistantEls.length > initCount) {
+        const lastEl = assistantEls[assistantEls.length - 1];
+        const isGenerating = !!document.querySelector(
+          '.animate-pulse, [aria-label*="Generating" i], [aria-label*="Gerando" i], [data-testid*="image-generating"], button[data-testid="stop-button"], button[aria-label*="Stop" i], button[aria-label*="Parar" i]'
+        );
+        return {
+          text: lastEl.innerText || lastEl.textContent || '',
+          isGenerating,
+          hasEl: true,
+        };
+      }
+      return { text: '', isGenerating: true, hasEl: false };
+    }, initialAssistantCount).catch(() => ({ text: '', isGenerating: true, hasEl: false }));
 
-      if (text && text !== lastStreamedText) {
-        lastStreamedText = text;
-        if (typeof onChunk === 'function') {
-          onChunk(text);
-        }
+    if (snapshot.text && snapshot.text !== lastStreamedText) {
+      lastStreamedText = snapshot.text;
+      if (typeof onChunk === 'function') {
+        onChunk(snapshot.text);
       }
     }
 
-    // Check if DALL-E is currently generating an image
-    const isGeneratingImage = await page.$('.animate-pulse, [aria-label*="Generating" i], [aria-label*="Gerando" i], [data-testid*="image-generating"]');
-    if (isGeneratingImage) {
-      await sleep(1000);
-      continue;
-    }
-
-    const stopBtn = await page.$(
-      '[data-testid="stop-button"], button[aria-label*="Stop" i], button[aria-label*="Parar" i]'
-    );
-    if (!stopBtn && lastStreamedText.length > 0) {
-      // If prompt requested image, allow extra 3 seconds for DALL-E image DOM settlement
+    if (!snapshot.isGenerating && lastStreamedText.length > 0) {
       if (isImageRequest) {
         await sleep(2500);
       } else {
-        await sleep(350);
-      }
-      const assistantEls = await page.$$('[data-message-author-role="assistant"]');
-      if (assistantEls.length > initialAssistantCount) {
-        lastStreamedText = await assistantEls[assistantEls.length - 1].innerText().catch(() => lastStreamedText);
-        if (typeof onChunk === 'function') onChunk(lastStreamedText);
+        await sleep(250);
       }
       doneStreaming = true;
     }

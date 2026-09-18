@@ -599,8 +599,8 @@ body {
 }
 
 .typing-dot {
-  width: 4px;
-  height: 4px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
   background: var(--muted);
   animation: typing-bounce 1.2s ease-in-out infinite;
@@ -609,8 +609,25 @@ body {
 .typing-dot:nth-child(3) { animation-delay: 0.4s; }
 
 @keyframes typing-bounce {
-  0%, 100% { transform: translateY(0);    opacity: 0.4; }
-  40%       { transform: translateY(-4px); opacity: 1;   }
+  0%, 100% { transform: translateY(0);    opacity: 0.35; }
+  40%       { transform: translateY(-4px); opacity: 1;    background: var(--white); }
+}
+
+/* Streaming live cursor */
+.streaming-cursor {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  background: var(--white);
+  margin-left: 4px;
+  vertical-align: middle;
+  animation: cursor-blink 0.8s infinite;
+  border-radius: 1px;
+}
+
+@keyframes cursor-blink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0; }
 }
 
 .rotation-notice {

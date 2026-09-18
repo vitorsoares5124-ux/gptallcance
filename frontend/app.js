@@ -967,20 +967,25 @@ form.addEventListener('submit', async (e) => {
       throw new Error(err.error || `HTTP ${response.status}`);
     }
 
-    removeTypingIndicator();
-
-    // Create live response bubble
-    const aiMessageEl = document.createElement('div');
-    aiMessageEl.className = 'message ai';
-    aiMessageEl.setAttribute('role', 'article');
-    aiMessageEl.setAttribute('aria-label', 'AllcanceAI');
-    const bubble = document.createElement('div');
-    bubble.className = 'bubble';
-    aiMessageEl.appendChild(bubble);
-    messagesEl.appendChild(aiMessageEl);
-
+    let aiMessageEl = null;
+    let bubble = null;
     let accumulatedText = '';
     let finalResultData = null;
+
+    function getOrCreateAiBubble() {
+      if (!aiMessageEl) {
+        removeTypingIndicator();
+        aiMessageEl = document.createElement('div');
+        aiMessageEl.className = 'message ai';
+        aiMessageEl.setAttribute('role', 'article');
+        aiMessageEl.setAttribute('aria-label', 'AllcanceAI');
+        bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        aiMessageEl.appendChild(bubble);
+        messagesEl.appendChild(aiMessageEl);
+      }
+      return bubble;
+    }
 
     if (response.body && typeof response.body.getReader === 'function') {
       const reader = response.body.getReader();
@@ -1007,16 +1012,18 @@ form.addEventListener('submit', async (e) => {
               const payload = JSON.parse(jsonStr);
               if (currentEvent === 'chunk') {
                 accumulatedText = payload.text;
-                bubble.innerHTML = parseMarkdown(accumulatedText);
+                const activeBubble = getOrCreateAiBubble();
+                activeBubble.innerHTML = parseMarkdown(accumulatedText) + '<span class="streaming-cursor"></span>';
                 scrollToBottom();
               } else if (currentEvent === 'done') {
                 finalResultData = payload;
                 accumulatedText = payload.text || accumulatedText;
-                bubble.innerHTML = parseMarkdown(accumulatedText);
+                const activeBubble = getOrCreateAiBubble();
+                activeBubble.innerHTML = parseMarkdown(accumulatedText);
 
                 if (payload.images && payload.images.length > 0) {
                   for (const genImg of payload.images) {
-                    bubble.appendChild(createImageElement(genImg));
+                    activeBubble.appendChild(createImageElement(genImg));
                   }
                 }
                 scrollToBottom();
@@ -1033,9 +1040,20 @@ form.addEventListener('submit', async (e) => {
       const data = await response.json();
       accumulatedText = data.text;
       finalResultData = data;
-      bubble.innerHTML = parseMarkdown(data.text);
+      const activeBubble = getOrCreateAiBubble();
+      activeBubble.innerHTML = parseMarkdown(data.text);
       if (data.images && data.images.length > 0) {
         for (const genImg of data.images) {
+          activeBubble.appendChild(createImageElement(genImg));
+        }
+      }
+    }
+
+    // Ensure cursor is removed if loop ended
+    if (bubble) {
+      bubble.innerHTML = parseMarkdown(accumulatedText);
+      if (finalResultData?.images && finalResultData.images.length > 0) {
+        for (const genImg of finalResultData.images) {
           bubble.appendChild(createImageElement(genImg));
         }
       }

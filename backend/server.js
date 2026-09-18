@@ -69,7 +69,11 @@ app.post('/chat', async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders();
+
+    // Send immediate initial event so client knows stream is established
+    res.write(`event: start\ndata: ${JSON.stringify({ status: 'connected' })}\n\n`);
 
     try {
       const result = await chat(

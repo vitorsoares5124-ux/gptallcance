@@ -350,34 +350,40 @@ sidebarBackdrop.addEventListener('click', () => {
   appContainer.classList.remove('sidebar-mobile-open');
 });
 
-// ─── Status (SSE) ────────────────────────────────────────────────────────────
+// ─── Status (SSE & REST) ────────────────────────────────────────────────────
 
 function updateStatus(status) {
   if (!statusDot || !statusLabel) return;
 
-  if (!status.active && !status.creatingStandby) {
-    statusDot.className = 'status-dot error';
-    statusLabel.textContent = 'Offline';
-    return;
-  }
-
-  if (status.active) {
+  if (status && status.active) {
     statusDot.className = 'status-dot active';
-    statusLabel.textContent = status.standby ? 'Pronto' : 'Pronto · preparando reserva';
+    statusLabel.textContent = 'Pronto';
   } else {
     statusDot.className = 'status-dot creating';
-    statusLabel.textContent = 'Inicializando...';
+    statusLabel.textContent = 'Conectando aos servidores...';
   }
 }
 
 function handleRotating() {
   if (statusDot) statusDot.className = 'status-dot rotating';
-  if (statusLabel) statusLabel.textContent = 'Trocando conta...';
+  if (statusLabel) statusLabel.textContent = 'Renovando conexão...';
   addRotationNotice();
+}
+
+async function checkInitialStatus() {
+  try {
+    const res = await fetch(`${API}/status`);
+    if (res.ok) {
+      const data = await res.json();
+      updateStatus(data);
+    }
+  } catch (_) {}
 }
 
 function connectSSE() {
   if (eventSourceInstance) eventSourceInstance.close();
+
+  checkInitialStatus();
 
   try {
     eventSourceInstance = new EventSource(`${API}/status/stream`);
@@ -396,10 +402,13 @@ function connectSSE() {
     });
 
     eventSourceInstance.onerror = () => {
-      if (statusDot) statusDot.className = 'status-dot error';
-      if (statusLabel) statusLabel.textContent = 'Reconectando...';
+      if (statusDot) statusDot.className = 'status-dot creating';
+      if (statusLabel) statusLabel.textContent = 'Conectando aos servidores...';
     };
-  } catch (_) {}
+  } catch (_) {
+    if (statusDot) statusDot.className = 'status-dot creating';
+    if (statusLabel) statusLabel.textContent = 'Conectando aos servidores...';
+  }
 }
 
 // ─── Image Attachment & Compression ──────────────────────────────────────────

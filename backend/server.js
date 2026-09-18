@@ -59,17 +59,43 @@ app.get('/status', (req, res) => {
 });
 
 app.post('/chat', async (req, res) => {
-  const { message, image, conversationId, history } = req.body;
+  const { message, image, conversationId, history, stream = true } = req.body;
   if ((!message || typeof message !== 'string' || !message.trim()) && !image) {
     return res.status(400).json({ error: 'message or image is required' });
   }
 
-  try {
-    const result = await chat((message || '').trim(), image || null, conversationId || null, history || []);
-    res.json(result);
-  } catch (err) {
-    console.error('[Server] Chat error:', err.message);
-    res.status(500).json({ error: err.message });
+  if (stream) {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.flushHeaders();
+
+    try {
+      const result = await chat(
+        (message || '').trim(),
+        image || null,
+        conversationId || null,
+        history || [],
+        (chunkText) => {
+          res.write(`event: chunk\ndata: ${JSON.stringify({ text: chunkText })}\n\n`);
+        }
+      );
+      res.write(`event: done\ndata: ${JSON.stringify(result)}\n\n`);
+      res.end();
+    } catch (err) {
+      console.error('[Server] Chat stream error:', err.message);
+      res.write(`event: error\ndata: ${JSON.stringify({ error: err.message })}\n\n`);
+      res.end();
+    }
+  } else {
+    try {
+      const result = await chat((message || '').trim(), image || null, conversationId || null, history || []);
+      res.json(result);
+    } catch (err) {
+      console.error('[Server] Chat error:', err.message);
+      res.status(500).json({ error: err.message });
+    }
   }
 });
 

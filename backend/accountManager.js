@@ -1,18 +1,21 @@
-// sessionPool.js (accountManager.js)
+// accountManager.js
 // Manages a warm pool of browser sessions with transparent rotation,
-// session persistence across restarts, and per-conversation context injection.
+// 2-standby buffer pool for 0ms failover, session persistence across restarts,
+// and per-conversation context injection.
 
 import { EventEmitter } from 'events';
 import { resumeOrCreateSession, runQuery } from './automation.js';
 
 export const events = new EventEmitter();
 
+const MAX_STANDBYS = 2;
+
 const pool = {
-  active:  null,   // { id, email, page, context, browser, msgCount, isFresh, currentConversationId, createdAt }
-  standby: null,
+  active:   null,   // { id, email, page, context, browser, msgCount, isFresh, currentConversationId, createdAt }
+  standbys: [],     // Array of standby sessions ready for instant failover
 };
 
-let isProvisioning = false;
+let provisioningCount = 0;
 
 // ─── Internal ─────────────────────────────────────────────────────────────────
 
@@ -27,20 +30,24 @@ function emitStatus() {
   events.emit('status', getStatus());
 }
 
+async function provisionStandbyIfNeeded() {
+  if (pool.standbys.length + provisioningCount >= MAX_STANDBYS) return;
+  provisionSlot('standby');
+}
+
 async function provisionSlot(role) {
-  if (isProvisioning && role === 'standby') {
-    log('[Pool] Standby already provisioning — skipping duplicate');
-    return;
+  if (role === 'standby') {
+    if (pool.standbys.length + provisioningCount >= MAX_STANDBYS) return;
+    provisioningCount++;
   }
 
-  if (role === 'standby') isProvisioning = true;
-  log(`[Pool] Preparing ${role} session...`);
+  log(`[Pool] Preparing ${role} session... (Standbys: ${pool.standbys.length}/${MAX_STANDBYS})`);
   emitStatus();
 
   try {
     const result = await resumeOrCreateSession(role, log);
     const session = {
-      id:        `s_${Date.now()}`,
+      id:        `s_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       email:     result.email,
       page:      result.page,
       context:   result.context,
@@ -51,29 +58,44 @@ async function provisionSlot(role) {
       createdAt: new Date().toISOString(),
     };
 
-    pool[role] = session;
+    if (role === 'active') {
+      pool.active = session;
+    } else {
+      pool.standbys.push(session);
+    }
+
     log(`[Pool] ${role.toUpperCase()} session ready → ${result.email} (${result.isResumed ? 'Resumed' : 'New'})`);
     emitStatus();
+
+    // If we have fewer standbys than MAX_STANDBYS, queue next standby
+    if (pool.standbys.length < MAX_STANDBYS) {
+      setTimeout(() => provisionStandbyIfNeeded(), 5000);
+    }
   } catch (err) {
     log(`[Pool] Failed to prepare ${role}: ${err.message}. Retrying in 15s...`);
-    pool[role] = null;
+    if (role === 'active' && !pool.active) {
+      pool.active = null;
+    }
     emitStatus();
     setTimeout(() => provisionSlot(role), 15_000);
   } finally {
-    if (role === 'standby') isProvisioning = false;
+    if (role === 'standby') {
+      provisioningCount = Math.max(0, provisioningCount - 1);
+    }
   }
 }
 
 async function rotate() {
   log('[Pool] Quota reached — rotating sessions...');
 
-  if (!pool.standby) {
-    log('[Pool] No warm session ready — waiting...');
+  if (pool.standbys.length === 0) {
+    log('[Pool] No warm session in buffer — provisioning urgent standby...');
+    provisionStandbyIfNeeded();
     const deadline = Date.now() + 180_000;
-    while (!pool.standby && Date.now() < deadline) {
-      await sleep(2000);
+    while (pool.standbys.length === 0 && Date.now() < deadline) {
+      await sleep(1500);
     }
-    if (!pool.standby) throw new Error('Rotation failed: no standby after 3min');
+    if (pool.standbys.length === 0) throw new Error('Rotation failed: no standby available after 3min');
   }
 
   if (pool.active) {
@@ -81,16 +103,16 @@ async function rotate() {
     if (pool.active.browser) pool.active.browser.close().catch(() => {});
   }
 
-  pool.active  = pool.standby;
+  pool.active = pool.standbys.shift();
   // Brand new promoted session must receive context injection on its first prompt
   pool.active.isFresh = true;
   pool.active.currentConversationId = null;
-  pool.standby = null;
 
-  log(`[Pool] Rotated. Primary: ${pool.active.email}`);
+  log(`[Pool] Rotated instantly. Primary: ${pool.active.email} (Remaining standbys: ${pool.standbys.length})`);
   emitStatus();
 
-  provisionSlot('standby');
+  // Top up standbys buffer in background
+  provisionStandbyIfNeeded();
 }
 
 function sleep(ms) {
@@ -100,23 +122,24 @@ function sleep(ms) {
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
- * Boot the pool. Resumes active session or provisions fresh.
+ * Boot the pool. Resumes active session and warms standby buffer.
  */
 export async function initialize() {
-  log('[Pool] Initializing with Per-Conversation Context Injection...');
+  log('[Pool] Initializing with Per-Conversation Context Injection & 2-Standby Buffer...');
   await provisionSlot('active');
-  setTimeout(() => provisionSlot('standby'), 12000);
+  setTimeout(() => provisionStandbyIfNeeded(), 8000);
 }
 
 /**
- * Send a query (text + optional image) with per-conversation context injection.
+ * Send a query (text + optional image) with per-conversation context injection and live streaming.
  * @param {string} message - User text prompt
  * @param {object|string|null} image - Base64 image or { dataUrl, filename }
  * @param {string|null} conversationId - Current active conversation ID
  * @param {Array} history - Prior messages in this specific conversation
+ * @param {Function|null} onChunk - Real-time chunk stream callback
  */
-export async function chat(message, image = null, conversationId = null, history = []) {
-  if (!pool.active) throw new Error('Pool not ready');
+export async function chat(message, image = null, conversationId = null, history = [], onChunk = null) {
+  if (!pool.active) throw new Error('Pool not ready — initializing browser session');
 
   const session = pool.active;
   log(`[Pool] Query via ${session.email} (#${session.msgCount + 1}) [Conv: ${conversationId || 'default'}]`);
@@ -139,16 +162,16 @@ export async function chat(message, image = null, conversationId = null, history
     }
   }
 
-  const result = await runQuery(session.page, message, image, historyContext, log);
+  const result = await runQuery(session.page, message, image, historyContext, onChunk, log);
   session.msgCount++;
   session.isFresh = false;
   session.currentConversationId = conversationId;
 
   if (result.isLimited) {
-    log('[Pool] Quota hit — rotating...');
+    log('[Pool] Quota hit — rotating instantly...');
     await rotate();
-    log('[Pool] Retrying query with new session (Context Injection will carry history)...');
-    return await chat(message, image, conversationId, history);
+    log('[Pool] Retrying query with warm standby (Context Injection will carry history)...');
+    return await chat(message, image, conversationId, history, onChunk);
   }
 
   return {
@@ -165,8 +188,9 @@ export async function chat(message, image = null, conversationId = null, history
  */
 export function getStatus() {
   return {
-    active:          pool.active  ? { email: pool.active.email,  msgCount: pool.active.msgCount } : null,
-    standby:         pool.standby ? { email: pool.standby.email } : null,
-    creatingStandby: isProvisioning,
+    active:          pool.active ? { email: pool.active.email, msgCount: pool.active.msgCount } : null,
+    standbys:        pool.standbys.map(s => ({ email: s.email })),
+    standbyCount:    pool.standbys.length,
+    creatingStandby: provisioningCount > 0,
   };
 }

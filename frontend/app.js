@@ -542,26 +542,91 @@ input.addEventListener('keydown', (e) => {
   }
 });
 
-// ─── Message rendering ───────────────────────────────────────────────────────
+// ─── Code Copy Function (Global Scope) ───────────────────────────────────────
 
-function parseMarkdown(text) {
-  let html = text
+window.copyCodeBlock = function(btn) {
+  const wrapper = btn.closest('.code-block-wrapper');
+  if (!wrapper) return;
+  const codeEl = wrapper.querySelector('code');
+  if (!codeEl) return;
+  const text = codeEl.innerText || codeEl.textContent;
+
+  navigator.clipboard.writeText(text).then(() => {
+    const span = btn.querySelector('span');
+    if (span) span.textContent = 'Copiado!';
+    btn.classList.add('copied');
+    setTimeout(() => {
+      if (span) span.textContent = 'Copiar';
+      btn.classList.remove('copied');
+    }, 2000);
+  }).catch(() => {});
+};
+
+// ─── Message rendering & Syntax Highlighting ─────────────────────────────────
+
+function highlightSyntax(code, lang = '') {
+  let safe = code
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
 
-  html = html.replace(/```[\w]*\n?([\s\S]*?)```/g, (_, code) =>
-    `<pre><code>${code.trim()}</code></pre>`
-  );
+  // Strings (single, double, template)
+  safe = safe.replace(/("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`[\s\S]*?`)/g, '<span class="hl-str">$1</span>');
+  // Comments (// and /* */ and #)
+  safe = safe.replace(/(\/\/[^\n]*|\/\*[\s\S]*?\*\/|#[^\n]*)/g, '<span class="hl-comment">$1</span>');
+  // Keywords
+  safe = safe.replace(/\b(const|let|var|function|return|if|else|for|while|import|export|from|default|class|async|await|try|catch|new|this|typeof|null|undefined|true|false|def|self|print|elif|in|is|and|or|not)\b/g, '<span class="hl-keyword">$1</span>');
+  // Numbers
+  safe = safe.replace(/\b(\d+(?:\.\d+)?)\b/g, '<span class="hl-num">$1</span>');
 
+  return safe;
+}
+
+function parseMarkdown(text) {
+  if (!text) return '';
+
+  const codeBlocks = [];
+  let processed = text.replace(/```([a-zA-Z0-9_-]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+    const idx = codeBlocks.length;
+    const cleanLang = (lang || 'code').toLowerCase();
+    const highlighted = highlightSyntax(code.trim(), cleanLang);
+    const blockHtml = `
+      <div class="code-block-wrapper">
+        <div class="code-block-header">
+          <span class="code-lang-tag">${cleanLang}</span>
+          <button type="button" class="copy-code-btn" onclick="copyCodeBlock(this)">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copiar</span>
+          </button>
+        </div>
+        <pre><code class="language-${cleanLang}">${highlighted}</code></pre>
+      </div>`;
+    codeBlocks.push(blockHtml);
+    return `__CODE_BLOCK_${idx}__`;
+  });
+
+  let html = processed
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+  // Inline code
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+  // Headings
   html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
   html = html.replace(/^## (.+)$/gm,  '<h2>$1</h2>');
   html = html.replace(/^# (.+)$/gm,   '<h1>$1</h1>');
+
+  // Bold & Italic
   html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   html = html.replace(/\*([^*]+)\*/g,     '<em>$1</em>');
   html = html.replace(/^---+$/gm, '<hr>');
 
+  // Lists
   html = html.replace(/((?:^[•\-\*] .+\n?)+)/gm, (block) => {
     const items = block.trim().split('\n').map(line =>
       `<li>${line.replace(/^[•\-\*] /, '')}</li>`
@@ -576,11 +641,18 @@ function parseMarkdown(text) {
     return `<ol>${items}</ol>`;
   });
 
+  // Links
   html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
 
-  html = html.replace(/^(?!<[houplais]|<pre|<hr)(.+)$/gm, (line) => {
+  // Paragraphs
+  html = html.replace(/^(?!<[houplais]|<hr|__CODE_BLOCK_)(.+)$/gm, (line) => {
     if (line.trim()) return `<p>${line}</p>`;
     return '';
+  });
+
+  // Re-inject code blocks
+  codeBlocks.forEach((block, i) => {
+    html = html.replace(`__CODE_BLOCK_${i}__`, block);
   });
 
   return html;
@@ -671,11 +743,11 @@ function addRotationNotice() {
 function scrollToBottom() {
   requestAnimationFrame(() => {
     const main = document.getElementById('chat-main');
-    main.scrollTop = main.scrollHeight;
+    if (main) main.scrollTop = main.scrollHeight;
   });
 }
 
-// ─── Send Form Handler ────────────────────────────────────────────────────────
+// ─── Send Form Handler with Real-Time Live Streaming ─────────────────────────
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -736,7 +808,7 @@ form.addEventListener('submit', async (e) => {
       headers['X-User-Id'] = currentUserId;
     }
 
-    const res = await fetch(`${API}/chat`, {
+    const response = await fetch(`${API}/chat`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -744,29 +816,103 @@ form.addEventListener('submit', async (e) => {
         image: currentImage ? currentImage.dataUrl : null,
         conversationId: activeConversationId,
         history: historyPayload,
+        stream: true,
       }),
     });
 
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: 'Erro desconhecido' }));
-      throw new Error(err.error || `HTTP ${res.status}`);
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ error: 'Erro de comunicação' }));
+      throw new Error(err.error || `HTTP ${response.status}`);
     }
 
-    const data = await res.json();
     removeTypingIndicator();
+
+    // Create live response bubble
+    const aiMessageEl = document.createElement('div');
+    aiMessageEl.className = 'message ai';
+    aiMessageEl.setAttribute('role', 'article');
+    aiMessageEl.setAttribute('aria-label', 'AllcanceAI');
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    aiMessageEl.appendChild(bubble);
+    messagesEl.appendChild(aiMessageEl);
+
+    let accumulatedText = '';
+    let finalResultData = null;
+
+    if (response.body && typeof response.body.getReader === 'function') {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // keep partial line in buffer
+
+        let currentEvent = 'message';
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          if (trimmed.startsWith('event:')) {
+            currentEvent = trimmed.replace('event:', '').trim();
+          } else if (trimmed.startsWith('data:')) {
+            const jsonStr = trimmed.replace('data:', '').trim();
+            try {
+              const payload = JSON.parse(jsonStr);
+              if (currentEvent === 'chunk') {
+                accumulatedText = payload.text;
+                bubble.innerHTML = parseMarkdown(accumulatedText);
+                scrollToBottom();
+              } else if (currentEvent === 'done') {
+                finalResultData = payload;
+                accumulatedText = payload.text || accumulatedText;
+                bubble.innerHTML = parseMarkdown(accumulatedText);
+
+                if (payload.images && payload.images.length > 0) {
+                  for (const genImg of payload.images) {
+                    const wrap = document.createElement('div');
+                    wrap.className = 'message-image-wrapper';
+                    const img = document.createElement('img');
+                    img.src = genImg.dataUrl || genImg.src;
+                    img.alt = genImg.alt || 'Imagem gerada';
+                    img.className = 'message-img';
+                    img.loading = 'lazy';
+                    img.addEventListener('click', () => openLightbox(img.src));
+                    wrap.appendChild(img);
+                    bubble.appendChild(wrap);
+                  }
+                }
+                scrollToBottom();
+              } else if (currentEvent === 'error') {
+                throw new Error(payload.error || 'Erro no processamento');
+              }
+            } catch (jsonErr) {
+              if (currentEvent === 'error') throw jsonErr;
+            }
+          }
+        }
+      }
+    } else {
+      const data = await response.json();
+      accumulatedText = data.text;
+      finalResultData = data;
+      bubble.innerHTML = parseMarkdown(data.text);
+    }
 
     const aiMsgObj = {
       role: 'ai',
-      text: data.text,
-      generatedImages: data.images || [],
+      text: accumulatedText,
+      generatedImages: finalResultData?.images || [],
       timestamp: new Date().toISOString(),
     };
 
     conv.messages.push(aiMsgObj);
     conv.updatedAt = new Date().toISOString();
     saveConversations();
-
-    renderMessageInDOM('ai', data.text, null, data.images || []);
 
   } catch (err) {
     removeTypingIndicator();

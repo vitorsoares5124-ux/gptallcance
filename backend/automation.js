@@ -3,6 +3,7 @@
 //
 // Supports:
 //   - Persistent session storage across restarts (storageState)
+//   - Real-time token/chunk streaming
 //   - Text queries and image attachments (Vision & DALL-E)
 //   - Context Injection across session rotations
 
@@ -194,6 +195,7 @@ export async function provisionSession(log = console.log) {
     let displayName    = generateDisplayName();
     let unknownCycles  = 0;
     let continueCycles = 0;
+    let challengeStart = null;
 
     while (true) {
       const state = await detectState(page);
@@ -205,8 +207,14 @@ export async function provisionSession(log = console.log) {
         return { email, page, context, browser };
       }
 
-      // ── CHALLENGE_FORM (Cloudflare Turnstile) ─────────────────────────────
+      // ── CHALLENGE_FORM (Cloudflare Turnstile with Timeout Protection) ─────
       if (state === 'CHALLENGE_FORM') {
+        if (!challengeStart) challengeStart = Date.now();
+        if (Date.now() - challengeStart > 25000) {
+          log('[Session] ⚠ Cloudflare challenge timeout — recycling session...');
+          throw new Error('Cloudflare challenge timed out after 25s');
+        }
+
         log('[Session] Cloudflare challenge detected — attempting interaction...');
         const iframes = await page.$$('iframe');
         let clicked = false;
@@ -222,12 +230,11 @@ export async function provisionSession(log = console.log) {
             }
           }
         }
-        if (!clicked) {
-          log('[Session] Waiting for challenge resolution...');
-        }
-        await sleep(4000);
+        await sleep(3500);
         continue;
       }
+
+      challengeStart = null;
 
       // ── FLOW_ERROR ────────────────────────────────────────────────────────
       if (state === 'FLOW_ERROR') {
@@ -306,7 +313,6 @@ export async function provisionSession(log = console.log) {
             await sleep(300);
           }
 
-          // Age/number field
           const ageInput = await getVisible(page, SEL.ageField);
           if (ageInput) {
             try {
@@ -374,7 +380,8 @@ export async function provisionSession(log = console.log) {
 
   } catch (err) {
     log(`[Session] ✗ ${err.message}`);
-    await context.close();
+    await context.close().catch(() => {});
+    await browser.close().catch(() => {});
     throw err;
   }
 }
@@ -386,7 +393,6 @@ export async function resumeOrCreateSession(slot = 'active', log = console.log) 
   const statePath = path.join(SESSIONS_DIR, `${slot}_state.json`);
   const metaPath = path.join(SESSIONS_DIR, `${slot}_meta.json`);
 
-  // Try resuming existing session from storageState
   if (fs.existsSync(statePath) && fs.existsSync(metaPath)) {
     try {
       const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
@@ -427,7 +433,6 @@ export async function resumeOrCreateSession(slot = 'active', log = console.log) 
     }
   }
 
-  // Provision brand new session
   const session = await provisionSession(log);
   try {
     await session.context.storageState({ path: statePath });
@@ -440,9 +445,9 @@ export async function resumeOrCreateSession(slot = 'active', log = console.log) 
   return { ...session, isResumed: false };
 }
 
-// ─── Run query (Text + Image + Context Injection support) ─────────────────────
+// ─── Run query (Text + Image + Real-Time Chunk Streaming) ─────────────────────
 
-export async function runQuery(page, message, image = null, historyContext = null, log = console.log) {
+export async function runQuery(page, message, image = null, historyContext = null, onChunk = null, log = console.log) {
   let input = await getVisible(page, SEL.targetInterface);
 
   if (!input) {
@@ -547,35 +552,54 @@ export async function runQuery(page, message, image = null, historyContext = nul
 
   if (!dispatched) await page.keyboard.press('Enter');
 
-  // Clean up temp upload file
   if (tempFilePath) {
     try { fs.unlinkSync(tempFilePath); } catch (_) {}
   }
 
-  log('[Session] Query dispatched — awaiting response...');
+  log('[Session] Query dispatched — streaming response...');
 
   const initialAssistantCount = (await page.$$('[data-message-author-role="assistant"]')).length;
 
-  // Wait for new response element to appear
-  await page.waitForFunction(
-    (initial) => document.querySelectorAll('[data-message-author-role="assistant"]').length > initial,
-    initialAssistantCount,
-    { timeout: 70000, polling: 500 }
-  ).catch(() => {});
+  let lastStreamedText = '';
+  const pollStart = Date.now();
+  let doneStreaming = false;
 
-  // Wait for streaming to complete (stop button disappears)
-  await page.waitForFunction(
-    () => !document.querySelector('[data-testid="stop-button"], button[aria-label*="Stop" i], button[aria-label*="Parar" i]'),
-    { timeout: 180000, polling: 1000 }
-  ).catch(() => {});
+  // Poll assistant output every 120ms to stream chunks live to the user
+  while (!doneStreaming && Date.now() - pollStart < 120000) {
+    await sleep(120);
 
-  await sleep(800);
+    const assistantEls = await page.$$('[data-message-author-role="assistant"]');
+    if (assistantEls.length > initialAssistantCount) {
+      const currentEl = assistantEls[assistantEls.length - 1];
+      const text = await currentEl.innerText().catch(() => '');
+
+      if (text && text !== lastStreamedText) {
+        lastStreamedText = text;
+        if (typeof onChunk === 'function') {
+          onChunk(text);
+        }
+      }
+    }
+
+    const stopBtn = await page.$(
+      '[data-testid="stop-button"], button[aria-label*="Stop" i], button[aria-label*="Parar" i]'
+    );
+    if (!stopBtn && lastStreamedText.length > 0) {
+      await sleep(350);
+      const assistantEls = await page.$$('[data-message-author-role="assistant"]');
+      if (assistantEls.length > initialAssistantCount) {
+        lastStreamedText = await assistantEls[assistantEls.length - 1].innerText().catch(() => lastStreamedText);
+        if (typeof onChunk === 'function') onChunk(lastStreamedText);
+      }
+      doneStreaming = true;
+    }
+  }
 
   const responseElements = await page.$$('[data-message-author-role="assistant"]');
   if (responseElements.length === 0) throw new Error('No response element found');
 
   const lastEl = responseElements[responseElements.length - 1];
-  const responseText = await lastEl.innerText();
+  const responseText = lastStreamedText || (await lastEl.innerText());
 
   // ── Extract generated images (DALL-E / Visual Outputs) ──────────────────────
   let extractedImages = [];

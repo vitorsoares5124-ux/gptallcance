@@ -28,6 +28,8 @@ async function getSupabase() {
   return null;
 }
 
+const DEFAULT_TUNNEL_URL = 'https://exclude-duration-reel-feet.trycloudflare.com';
+
 // API endpoint configuration (supports Localhost, Vercel & Custom Tunnel/VPS)
 function getApiEndpoint() {
   if (window.BACKEND_API) return window.BACKEND_API;
@@ -36,8 +38,7 @@ function getApiEndpoint() {
   if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
     return 'http://localhost:3000';
   }
-  // External access with no saved URL: return empty, modal will guide user
-  return '';
+  return DEFAULT_TUNNEL_URL;
 }
 
 let API = getApiEndpoint();
@@ -387,7 +388,7 @@ function handleRotating() {
 async function testEndpoint(url) {
   const cleanUrl = url.replace(/\/+$/, '');
   const ctrl = new AbortController();
-  const tid = setTimeout(() => ctrl.abort(), 3500);
+  const tid = setTimeout(() => ctrl.abort(), 5000);
   try {
     const res = await fetch(`${cleanUrl}/status`, { signal: ctrl.signal });
     clearTimeout(tid);
@@ -400,55 +401,14 @@ async function testEndpoint(url) {
   return { ok: false };
 }
 
-async function checkInitialStatus() {
-  // Build candidate list
-  const candidates = [];
-  if (API) candidates.push(API);
-  // Always try localhost variants
-  if (!candidates.includes('http://localhost:3000')) candidates.push('http://localhost:3000');
-  if (!candidates.includes('http://127.0.0.1:3000')) candidates.push('http://127.0.0.1:3000');
-  // If deployed, also try same origin (in case backend serves frontend)
-  const originCandidate = window.location.origin;
-  if (!candidates.includes(originCandidate)) candidates.push(originCandidate);
-
-  for (const candidate of candidates) {
-    const res = await testEndpoint(candidate);
-    if (res.ok) {
-      API = candidate;
-      localStorage.setItem('allcance_backend_url', candidate);
-      updateStatus(res.data);
-      connectSSE();
-      return;
-    }
-  }
-
-  // No backend reachable — if external access, open configuration modal automatically
-  const isExternal = window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1';
-  if (isExternal) {
-    if (statusDot) statusDot.className = 'status-dot creating';
-    if (statusLabel) statusLabel.textContent = 'Servidor não configurado';
-    // Auto-open server config modal with guidance
-    setTimeout(() => {
-      openServerModal();
-      if (serverTestFeedback) {
-        serverTestFeedback.className = 'server-feedback';
-        serverTestFeedback.classList.remove('auth-hidden');
-        serverTestFeedback.textContent = 'Configure a URL do servidor AllcanceAI (ex: URL do seu cloudflared/ngrok tunnel).';
-      }
-    }, 800);
-  }
-}
-
-function connectSSE() {
+function startSSEStream(url) {
   if (eventSourceInstance) {
     eventSourceInstance.close();
     eventSourceInstance = null;
   }
 
-  checkInitialStatus();
-
   try {
-    eventSourceInstance = new EventSource(`${API}/status/stream`);
+    eventSourceInstance = new EventSource(`${url}/status/stream`);
 
     eventSourceInstance.addEventListener('status', (e) => {
       try { updateStatus(JSON.parse(e.data)); } catch (_) {}
@@ -471,6 +431,43 @@ function connectSSE() {
     if (statusDot) statusDot.className = 'status-dot creating';
     if (statusLabel) statusLabel.textContent = 'Conectando aos servidores...';
   }
+}
+
+let statusCheckTimer = null;
+async function checkInitialStatus() {
+  if (statusCheckTimer) {
+    clearTimeout(statusCheckTimer);
+    statusCheckTimer = null;
+  }
+
+  // Build candidate list
+  const candidates = [];
+  if (API) candidates.push(API);
+  if (!candidates.includes(DEFAULT_TUNNEL_URL)) candidates.push(DEFAULT_TUNNEL_URL);
+  if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+    if (!candidates.includes('http://localhost:3000')) candidates.push('http://localhost:3000');
+    if (!candidates.includes('http://127.0.0.1:3000')) candidates.push('http://127.0.0.1:3000');
+  }
+
+  for (const candidate of candidates) {
+    const res = await testEndpoint(candidate);
+    if (res.ok) {
+      API = candidate;
+      localStorage.setItem('allcance_backend_url', candidate);
+      updateStatus(res.data);
+      startSSEStream(candidate);
+      return;
+    }
+  }
+
+  // If unreachable, update state and retry silently in background — never pop modal automatically
+  if (statusDot) statusDot.className = 'status-dot creating';
+  if (statusLabel) statusLabel.textContent = 'Conectando aos servidores...';
+  statusCheckTimer = setTimeout(checkInitialStatus, 8000);
+}
+
+function connectSSE() {
+  checkInitialStatus();
 }
 
 // ─── Server Configuration Modal ──────────────────────────────────────────────

@@ -45,7 +45,9 @@ const VIEWPORTS = [
 ];
 
 async function createFreshBrowser() {
-  const isHeadless = process.env.HEADLESS === 'true';
+  // Headless por padrão (nada aparece na barra de tarefas).
+  // Para DEPURAR vendo o navegador, rode: $env:HEADLESS='false'; npm start
+  const isHeadless = process.env.HEADLESS !== 'false';
   return await chromium.launch({
     headless: isHeadless,
     args: [

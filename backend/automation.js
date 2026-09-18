@@ -713,6 +713,9 @@ export async function runQuery(page, message, image = null, historyContext = nul
     if (lastEl) {
       await sleep(300);
       const imgElements = await lastEl.$$('img');
+      let bestImg = null;
+      let maxArea = 0;
+
       for (const imgEl of imgElements) {
         try {
           const isVisible = await imgEl.isVisible().catch(() => false);
@@ -722,23 +725,29 @@ export async function runQuery(page, message, image = null, historyContext = nul
           if (!box || box.width < 90 || box.height < 90) continue; // ignore avatars and icons
 
           const src = (await imgEl.getAttribute('src').catch(() => '')) || '';
-          if (src.includes('avatar') || src.includes('profile') || src.includes('icon')) continue;
+          if (src.includes('avatar') || src.includes('profile') || src.includes('icon') || src.includes('user')) continue;
 
-          const alt = (await imgEl.getAttribute('alt').catch(() => '')) || 'Imagem gerada pela IA';
+          const area = box.width * box.height;
+          if (area > maxArea) {
+            maxArea = area;
+            bestImg = { imgEl, box, src };
+          }
+        } catch (_) {}
+      }
 
-          // Direct element screenshot guarantees 100% visual capture with zero CORS issues
-          const buffer = await imgEl.screenshot({ type: 'png' }).catch(() => null);
-          const dataUrl = buffer ? `data:image/png;base64,${buffer.toString('base64')}` : src;
+      if (bestImg) {
+        const alt = (await bestImg.imgEl.getAttribute('alt').catch(() => '')) || 'Imagem gerada pela IA';
+        const buffer = await bestImg.imgEl.screenshot({ type: 'jpeg', quality: 90 }).catch(() => null);
+        const dataUrl = buffer ? `data:image/jpeg;base64,${buffer.toString('base64')}` : bestImg.src;
 
-          extractedImages.push({
-            src: dataUrl,
-            dataUrl,
-            alt,
-          });
-          log(`[Session] ✓ Generated image extracted from DOM (${Math.round(box.width)}x${Math.round(box.height)}px)`);
-        } catch (singleImgErr) {
-          log(`[Session] Image capture note: ${singleImgErr.message}`);
-        }
+        extractedImages.push({
+          src: dataUrl,
+          dataUrl,
+          alt,
+          width: Math.round(bestImg.box.width),
+          height: Math.round(bestImg.box.height),
+        });
+        log(`[Session] ✓ Best image extracted from DOM (${Math.round(bestImg.box.width)}x${Math.round(bestImg.box.height)}px, ${buffer ? Math.round(buffer.byteLength / 1024) + ' KB' : 'url'})`);
       }
     }
   } catch (imgExtractErr) {

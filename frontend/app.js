@@ -1026,8 +1026,7 @@ form.addEventListener('submit', async (e) => {
               const payload = JSON.parse(jsonStr);
               if (currentEvent === 'chunk') {
                 const chunkRaw = payload.text || '';
-                // Filter out raw tool / widget percentage text
-                const isWidgetStatus = /^(?:\s*Finalizando|\s*\d{1,3}%|\s*Criando imagem|\s*Gerando imagem|\s*Thinking|\s*Pensando)+\s*$/i.test(chunkRaw);
+                const isWidgetStatus = /^(?:\s*Editar|\s*Edit|\s*Finalizando|\s*\d{1,3}%|\s*Criando imagem|\s*Gerando imagem|\s*Thinking|\s*Pensando)+\s*$/i.test(chunkRaw);
                 if (!isWidgetStatus && chunkRaw.length > 0) {
                   accumulatedText = chunkRaw;
                   const activeBubble = getOrCreateAiBubble();
@@ -1036,21 +1035,6 @@ form.addEventListener('submit', async (e) => {
                 }
               } else if (currentEvent === 'done') {
                 finalResultData = payload;
-                let textResult = payload.text || accumulatedText || '';
-                const isWidgetOnly = !textResult || /^(?:\s*Editar|\s*Edit|\s*Finalizando|\s*\d{1,3}%|\s*Criando imagem|\s*Gerando imagem|\s*Thinking|\s*Pensando)+\s*$/i.test(textResult);
-                if (payload.images && payload.images.length > 0 && isWidgetOnly) {
-                  textResult = 'Aqui está a imagem gerada de acordo com o seu pedido:';
-                }
-                accumulatedText = textResult;
-                const activeBubble = getOrCreateAiBubble();
-                activeBubble.innerHTML = parseMarkdown(accumulatedText);
-
-                if (payload.images && payload.images.length > 0) {
-                  for (const genImg of payload.images) {
-                    activeBubble.appendChild(createImageElement(genImg));
-                  }
-                }
-                scrollToBottom();
               } else if (currentEvent === 'error') {
                 throw new Error(payload.error || 'Erro no processamento');
               }
@@ -1063,35 +1047,27 @@ form.addEventListener('submit', async (e) => {
     } else {
       const data = await response.json();
       finalResultData = data;
-      let textResult = data.text || '';
-      if (data.images && data.images.length > 0 && (!textResult || /^(?:\s*Finalizando|\s*\d{1,3}%|\s*Criando imagem)+\s*$/i.test(textResult))) {
-        textResult = 'Aqui está a imagem gerada de acordo com o seu pedido:';
-      }
-      accumulatedText = textResult;
-      const activeBubble = getOrCreateAiBubble();
-      activeBubble.innerHTML = parseMarkdown(accumulatedText);
-      if (data.images && data.images.length > 0) {
-        for (const genImg of data.images) {
-          activeBubble.appendChild(createImageElement(genImg));
-        }
-      }
     }
 
-    // Ensure cursor is removed and final state is pristine
+    // Ensure cursor is removed and final state with all images is pristine
     if (bubble) {
       removeTypingIndicator();
-      let textResult = accumulatedText;
+      let textResult = finalResultData?.text || accumulatedText || '';
       const imagesList = finalResultData?.images || [];
-      if (imagesList.length > 0 && (!textResult || /^(?:\s*Finalizando|\s*\d{1,3}%|\s*Criando imagem)+\s*$/i.test(textResult))) {
+      const isWidgetText = !textResult || /^(?:\s*Editar|\s*Edit|\s*Finalizando|\s*\d{1,3}%|\s*Criando imagem|\s*Gerando imagem|\s*Thinking|\s*Pensando)+\s*$/i.test(textResult);
+
+      if (imagesList.length > 0 && isWidgetText) {
         textResult = 'Aqui está a imagem gerada de acordo com o seu pedido:';
       }
       accumulatedText = textResult;
       bubble.innerHTML = parseMarkdown(accumulatedText);
+
       if (imagesList.length > 0) {
         for (const genImg of imagesList) {
           bubble.appendChild(createImageElement(genImg));
         }
       }
+      scrollToBottom();
     }
 
     const aiMsgObj = {

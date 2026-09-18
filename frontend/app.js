@@ -1005,6 +1005,10 @@ form.addEventListener('submit', async (e) => {
       const reader = response.body.getReader();
       const decoder = new TextDecoder('utf-8');
       let buffer = '';
+      // O tipo do evento SSE precisa persistir entre chunks de rede (a linha data:
+      // de um evento pode chegar dividida em vários reads). Só volta a 'message'
+      // na linha em branco, que marca o fim de um evento (spec SSE).
+      let currentEvent = 'message';
 
       while (true) {
         const { done, value } = await reader.read();
@@ -1014,10 +1018,12 @@ form.addEventListener('submit', async (e) => {
         const lines = buffer.split('\n');
         buffer = lines.pop(); // keep partial line in buffer
 
-        let currentEvent = 'message';
         for (const line of lines) {
           const trimmed = line.trim();
-          if (!trimmed) continue;
+          if (!trimmed) {
+            currentEvent = 'message';
+            continue;
+          }
           if (trimmed.startsWith('event:')) {
             currentEvent = trimmed.replace('event:', '').trim();
           } else if (trimmed.startsWith('data:')) {
@@ -1049,8 +1055,12 @@ form.addEventListener('submit', async (e) => {
       finalResultData = data;
     }
 
-    // Ensure cursor is removed and final state with all images is pristine
-    if (bubble) {
+    // Ensure cursor is removed and final state with all images is pristine.
+    // Sempre cria a bolha se houver resultado final com texto ou imagens,
+    // mesmo que nenhum chunk tenha sido processado antes.
+    const finalHasContent = Boolean(finalResultData?.text) || (finalResultData?.images?.length > 0);
+    if (bubble || finalHasContent) {
+      const finalBubble = getOrCreateAiBubble();
       removeTypingIndicator();
       let textResult = finalResultData?.text || accumulatedText || '';
       const imagesList = finalResultData?.images || [];
@@ -1060,11 +1070,11 @@ form.addEventListener('submit', async (e) => {
         textResult = 'Aqui está a imagem gerada de acordo com o seu pedido:';
       }
       accumulatedText = textResult;
-      bubble.innerHTML = parseMarkdown(accumulatedText);
+      finalBubble.innerHTML = parseMarkdown(accumulatedText);
 
       if (imagesList.length > 0) {
         for (const genImg of imagesList) {
-          bubble.appendChild(createImageElement(genImg));
+          finalBubble.appendChild(createImageElement(genImg));
         }
       }
       scrollToBottom();

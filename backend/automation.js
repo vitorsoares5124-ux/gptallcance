@@ -498,9 +498,128 @@ export async function resumeOrCreateSession(slot = 'active', log = console.log) 
   return { ...session, isResumed: false };
 }
 
+// ─── Kill-switch global da geração de imagens ────────────────────────────────
+// Mantive o código do gerador (generateFallbackImage etc.) intacto — basta
+// mudar para `true` para reativar no futuro.
+const IMAGE_GENERATION_ENABLED = false;
+
+// ─── Detecção rigorosa de pedido de geração de imagem ────────────────────────
+// Remove código colado (fences ```, <script>, tags HTML, data URLs) antes de
+// testar, e exige VERBO de criação + SUBSTANTIVO de imagem no texto limpo.
+// Assim, um "melhore o visual do site" com código colado NÃO dispara o bloqueio,
+// enquanto "crie uma imagem de um gato" dispara.
+const IMG_GEN_VERB = /(?:crie|criem|cria\b|criar|gere|gerem|gera\b|gerar|desenhe|desenhem|desenha\b|desenhar|faça|fazer|produza|produzir|ilustre|ilustrar|monte|montar|renderize|renderizar|imagine|conceba|crear|create|generate|make|draw|design|paint|pinte|pintar)/i;
+const IMG_NOUNS = /(?:imagem|imagens|image|images|foto|fotos|fotografia|ilustra(?:ção|ções|cao|coes)?|ilustration|logo|avatar|banner|wallpaper|arte\b|art\b|desenho|drawing|picture|painting|pôster|poster|retrato|portrait|capa)/i;
+
+function isImageGenerationPrompt(text) {
+  if (!text) return false;
+  const cleaned = text
+    .replace(/```[\s\S]*?```/g, ' ')          // blocos de código ``` ... ```
+    .replace(/`[^`\n]*`/g, ' ')               // código inline
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')                 // tags HTML coladas
+    .replace(/data:image\/[a-z]+;base64,[A-Za-z0-9+/=]+/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return IMG_GEN_VERB.test(cleaned) && IMG_NOUNS.test(cleaned);
+}
+
+// ─── DOM → Markdown serializer ────────────────────────────────────────────────
+// Roda dentro da página do ChatGPT. Converte a resposta renderizada do DOM para
+// Markdown REAL (com cercas ``` código), evitando que innerText derrube as
+// cercas e faça o frontend renderizar "código espalhado" em parágrafos <p>.
+function domToMarkdown(root) {
+  function ser(node) {
+    if (node.nodeType === 3) {
+      return node.textContent || '';
+    }
+    if (node.nodeType !== 1) return '';
+
+    const tag = node.tagName.toLowerCase();
+
+    // Bloco de código: usa apenas o conteúdo do <code> (ignora botões Copiar)
+    if (tag === 'pre') {
+      const codeEl = node.querySelector('code');
+      const codeText = (codeEl ? codeEl.textContent : node.textContent) || '';
+      const langMatch = (codeEl?.getAttribute('class') || '').match(/language-([\w+-]+)/i);
+      const lang = langMatch ? langMatch[1] : '';
+      return `\n\`\`\`${lang}\n${codeText.replace(/\s+$/, '')}\n\`\`\`\n`;
+    }
+
+    if (tag === 'code') return '`' + node.textContent + '`';
+    if (tag === 'br') return '\n';
+
+    if (tag === 'img') return '';
+
+    if (tag === 'button' || tag === 'svg' || tag === 'time') return '';
+
+    const style = window.getComputedStyle(node);
+    const isBlock = ['block', 'flex', 'grid'].includes(style.display) || ['p', 'div', 'section', 'article', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'tr'].includes(tag);
+
+    let inner = '';
+    for (const child of node.childNodes) {
+      inner += ser(child);
+    }
+
+    switch (tag) {
+      case 'h1': return `\n# ${inner.trim()}\n\n`;
+      case 'h2': return `\n## ${inner.trim()}\n\n`;
+      case 'h3': return `\n### ${inner.trim()}\n\n`;
+      case 'h4': return `\n#### ${inner.trim()}\n\n`;
+      case 'h5': return `\n##### ${inner.trim()}\n\n`;
+      case 'h6': return `\n###### ${inner.trim()}\n\n`;
+      case 'strong':
+      case 'b': return `**${inner}**`;
+      case 'em':
+      case 'i': return `*${inner}*`;
+      case 'del':
+      case 's': return `~~${inner}~~`;
+      case 'a': {
+        const href = node.getAttribute('href') || '#';
+        return `[${inner || href}](${href})`;
+      }
+      case 'li': return `${`- ${inner.trim()}`}\n`;
+      case 'ul':
+      case 'ol': return `\n${inner.replace(/\n+$/, '')}\n`;
+      case 'table': return inner; // simplificado
+      case 'tr': return inner.trim() ? `| ${inner.split(/\s*\|\s*/).filter(Boolean).join(' | ')} |\n` : '';
+      case 'td':
+      case 'th': return ` ${inner.trim()} |`;
+      case 'blockquote': return `> ${inner.trim()}\n\n`;
+      case 'hr': return `\n---\n`;
+      default:
+        // Bloco comum: adiciona separação para não grudar tudo
+        if (isBlock) return inner.trim() ? `${inner}\n` : '';
+        return inner;
+    }
+  }
+
+  let out = '';
+  for (const child of root.childNodes) {
+    out += ser(child);
+  }
+
+  // Normaliza espaços em branco excessivos
+  return out
+    .replace(/[ \t]+/g, ' ')
+    .replace(/(\s*\n){3,}/g, '\n\n')
+    .trim();
+}
+
 // ─── Run query (Text + Image + Real-Time Chunk Streaming) ─────────────────────
 
 export async function runQuery(page, message, image = null, historyContext = null, onChunk = null, log = console.log) {
+  // ── Geração de imagens TEMPORARIAMENTE DESATIVADA ───────────────────────
+  // Pedido real de criação de imagem → responde "em desenvolvimento" e NÃO
+  // despacha nada para o ChatGPT (não consome cota nem trava a sessão).
+  if (!IMAGE_GENERATION_ENABLED && isImageGenerationPrompt(message)) {
+    log('[ImageGen] Pedido de geração bloqueado (recurso em desenvolvimento) — ChatGPT não acionado.');
+    const aviso = '🎨 A criação de imagens ainda está em desenvolvimento e será liberada em breve. Por enquanto, posso analisar imagens que você enviar e ajudar com texto, código e ideias. Como posso ajudar?';
+    if (typeof onChunk === 'function') onChunk(aviso);
+    return { text: aviso, images: [], isLimited: false };
+  }
+
   let input = await getVisible(page, SEL.targetInterface);
 
   if (!input) {
@@ -579,7 +698,9 @@ export async function runQuery(page, message, image = null, historyContext = nul
   let finalPrompt = historyContext ? `${historyContext}\n\n[Mensagem Atual do Usuário]: ${userText}` : userText;
 
   // ── Image Request Detection ───────────────────────────────────────────────
-  const isImageRequest = /(?:crie|gerar|gere|desenhe|desenho|faça|criar|imagem|foto|fotografia|ilustração|render|draw|generate|image|picture|retrato)/i.test(userText);
+  // Usa a detecção rigorosa (verbo + substantivo, ignorando código colado),
+  // para que código/HTML colado com palavras como "image" não mude o polling.
+  const isImageRequest = isImageGenerationPrompt(userText);
 
   // Read baseline message count BEFORE typing or dispatching
   const initialAssistantCount = await page.evaluate(() => {
@@ -618,7 +739,7 @@ export async function runQuery(page, message, image = null, historyContext = nul
   log('[Session] Query dispatched — streaming response...');
 
   // ── IMAGE REQUEST: Instant Dedicated AI Generator (Zero widget delay, Zero percentage stalls) ──
-  if (isImageRequest && !image) {
+  if (IMAGE_GENERATION_ENABLED && isImageRequest && !image) {
     log('[ImageGen] Image request detected — generating directly via high-speed AI engine (2s)...');
     if (typeof onChunk === 'function') {
       onChunk('🎨 Criando imagem com IA em alta resolução...');
@@ -632,8 +753,15 @@ export async function runQuery(page, message, image = null, historyContext = nul
   function cleanWidgetText(txt) {
     if (!txt) return '';
     return txt
-      .replace(/\b(?:Editar|Edit|Finalizando|Criando imagem|Gerando imagem|Searching the web|Pesquisando|Thinking|Pensando|Finished|Creating image)\b/gi, '')
-      .replace(/\b\d{1,3}%\b/g, '')
+      .split('\n')
+      .filter((line) => {
+        const t = line.trim();
+        if (!t) return true;
+        // Remove apenas linhas que SÃO INTEIRAS um status de widget
+        // (nunca apaga uma palavra solta dentro de um parágrafo ou código).
+        return !/^(?:Editar|Edit|Finalizando|Criando imagem|Gerando imagem|Searching the web|Pesquisando|Thinking|Pensando|Finished|Creating image|\d{1,3}%)$/i.test(t);
+      })
+      .join('\n')
       .replace(/\n\s*\n+/g, '\n\n')
       .trim();
   }
@@ -711,7 +839,20 @@ export async function runQuery(page, message, image = null, historyContext = nul
 
   const responseElements = await page.$$('[data-message-author-role="assistant"], article [data-message-author-role="assistant"], .agent-turn');
   let lastEl = responseElements.length > 0 ? responseElements[responseElements.length - 1] : null;
-  let rawText = lastStreamedText || (lastEl ? await lastEl.innerText().catch(() => '') : '');
+
+  // Captura o texto final. Prioriza o DOM serializado para Markdown (com
+  // cercas ``` intactas), senão cai no innerText puro como fallback.
+  let rawText = '';
+  if (lastEl) {
+    try {
+      rawText = await lastEl.evaluate(domToMarkdown);
+    } catch (_) {
+      rawText = (await lastEl.innerText().catch(() => '')) || lastStreamedText;
+    }
+  } else {
+    rawText = lastStreamedText || '';
+  }
+
   let responseText = cleanWidgetText(rawText);
 
   // ── Extract generated images from ChatGPT DOM ───────────────────────────────
@@ -762,7 +903,7 @@ export async function runQuery(page, message, image = null, historyContext = nul
   }
 
   // ── Multi-Engine Fallback: If image requested but not captured in DOM ────────
-  if (isImageRequest && extractedImages.length === 0) {
+  if (IMAGE_GENERATION_ENABLED && isImageRequest && extractedImages.length === 0) {
     log('[ImageGen] Image not found in DOM — triggering multi-engine fallback generator...');
     if (typeof onChunk === 'function') {
       onChunk('🎨 Renderizando imagem em alta resolução...');

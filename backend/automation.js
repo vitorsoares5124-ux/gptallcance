@@ -578,9 +578,15 @@ export async function runQuery(page, message, image = null, historyContext = nul
   let userText = message && message.trim() ? message : (image ? 'Descreva ou processe esta imagem' : 'Olá');
   let finalPrompt = userText;
 
+  const isImageRequest = /(?:crie|gerar|gere|desenhe|desenho|faça|criar|imagem|foto|fotografia|ilustração|render|draw|generate|image|picture|retrato)/i.test(userText);
+
+  if (isImageRequest && !image) {
+    finalPrompt = `[INSTRUÇÃO DO SISTEMA: O usuário solicita a GERAÇÃO VISUAL de uma imagem. Invoque a ferramenta de criação de imagens (DALL-E / Image Generator) e gere a imagem correspondente agora em vez de apenas sugerir prompts textuais ou descrições.]\n\n${userText}`;
+  }
+
   if (historyContext && historyContext.trim()) {
     log('[Session] Injecting previous conversation history into prompt...');
-    finalPrompt = `${historyContext.trim()}\n\n---\n[Mensagem Atual do Usuário]: ${userText}`;
+    finalPrompt = `${historyContext.trim()}\n\n---\n[Mensagem Atual do Usuário]: ${finalPrompt}`;
   }
 
   // ── Enter prompt text ─────────────────────────────────────────────────────
@@ -634,11 +640,23 @@ export async function runQuery(page, message, image = null, historyContext = nul
       }
     }
 
+    // Check if DALL-E is currently generating an image
+    const isGeneratingImage = await page.$('.animate-pulse, [aria-label*="Generating" i], [aria-label*="Gerando" i], [data-testid*="image-generating"]');
+    if (isGeneratingImage) {
+      await sleep(1000);
+      continue;
+    }
+
     const stopBtn = await page.$(
       '[data-testid="stop-button"], button[aria-label*="Stop" i], button[aria-label*="Parar" i]'
     );
     if (!stopBtn && lastStreamedText.length > 0) {
-      await sleep(350);
+      // If prompt requested image, allow extra 3 seconds for DALL-E image DOM settlement
+      if (isImageRequest) {
+        await sleep(2500);
+      } else {
+        await sleep(350);
+      }
       const assistantEls = await page.$$('[data-message-author-role="assistant"]');
       if (assistantEls.length > initialAssistantCount) {
         lastStreamedText = await assistantEls[assistantEls.length - 1].innerText().catch(() => lastStreamedText);
@@ -657,37 +675,33 @@ export async function runQuery(page, message, image = null, historyContext = nul
   // ── Extract generated images (DALL-E / Visual Outputs) ──────────────────────
   let extractedImages = [];
   try {
-    extractedImages = await lastEl.$$eval('img', (imgs) => {
-      return imgs
-        .filter((img) => {
-          const src = img.src || '';
-          if (src.includes('avatar') || src.includes('profile') || src.includes('icon')) return false;
-          if (img.width > 0 && img.width < 50 && img.height > 0 && img.height < 50) return false;
-          return true;
-        })
-        .map((img) => ({
-          src: img.src,
-          alt: img.alt || 'Imagem gerada',
-        }));
-    });
+    await sleep(800);
+    const imgElements = await lastEl.$$('img');
+    for (const imgEl of imgElements) {
+      try {
+        const isVisible = await imgEl.isVisible().catch(() => false);
+        if (!isVisible) continue;
 
-    for (const imgItem of extractedImages) {
-      if (imgItem.src) {
-        try {
-          const dataUrl = await page.evaluate(async (url) => {
-            const res = await fetch(url);
-            const blob = await res.blob();
-            return new Promise((resolve) => {
-              const reader = new FileReader();
-              reader.onloadend = () => resolve(reader.result);
-              reader.readAsDataURL(blob);
-            });
-          }, imgItem.src);
+        const box = await imgEl.boundingBox().catch(() => null);
+        if (!box || box.width < 100 || box.height < 100) continue; // ignore avatars and icons
 
-          if (dataUrl) {
-            imgItem.dataUrl = dataUrl;
-          }
-        } catch (_) {}
+        const src = (await imgEl.getAttribute('src').catch(() => '')) || '';
+        if (src.includes('avatar') || src.includes('profile') || src.includes('icon')) continue;
+
+        const alt = (await imgEl.getAttribute('alt').catch(() => '')) || 'Imagem gerada';
+
+        // Direct element screenshot guarantees 100% visual capture with no CORS / CDN token expiration
+        const buffer = await imgEl.screenshot({ type: 'png' });
+        const dataUrl = `data:image/png;base64,${buffer.toString('base64')}`;
+
+        extractedImages.push({
+          src: dataUrl,
+          dataUrl,
+          alt,
+        });
+        log(`[Session] ✓ Generated image extracted successfully (${Math.round(box.width)}x${Math.round(box.height)}px)`);
+      } catch (singleImgErr) {
+        log(`[Session] Image capture note: ${singleImgErr.message}`);
       }
     }
   } catch (imgExtractErr) {

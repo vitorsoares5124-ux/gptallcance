@@ -755,6 +755,60 @@ function parseMarkdown(text) {
   return html;
 }
 
+function createImageElement(genImg) {
+  const wrap = document.createElement('div');
+  wrap.className = 'message-image-wrapper';
+
+  const src = genImg.dataUrl || genImg.src;
+  const img = document.createElement('img');
+  img.src = src;
+  img.alt = genImg.alt || 'Imagem gerada pela IA';
+  img.className = 'message-img';
+  img.loading = 'lazy';
+  img.addEventListener('click', () => openLightbox(src));
+
+  const overlay = document.createElement('div');
+  overlay.className = 'message-image-overlay';
+
+  const downloadBtn = document.createElement('a');
+  downloadBtn.className = 'image-action-btn download-btn';
+  downloadBtn.href = src;
+  downloadBtn.download = `allcance_ia_${Date.now()}.png`;
+  downloadBtn.title = 'Baixar Imagem';
+  downloadBtn.innerHTML = `
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+      <polyline points="7 10 12 15 17 10"></polyline>
+      <line x1="12" y1="15" x2="12" y2="3"></line>
+    </svg>
+    <span>Baixar</span>
+  `;
+
+  const zoomBtn = document.createElement('button');
+  zoomBtn.type = 'button';
+  zoomBtn.className = 'image-action-btn zoom-btn';
+  zoomBtn.title = 'Visualizar em Tela Cheia';
+  zoomBtn.innerHTML = `
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <polyline points="15 3 21 3 21 9"></polyline>
+      <polyline points="9 21 3 21 3 15"></polyline>
+      <line x1="21" y1="3" x2="14" y2="10"></line>
+      <line x1="3" y1="21" x2="10" y2="14"></line>
+    </svg>
+  `;
+  zoomBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openLightbox(src);
+  });
+
+  overlay.appendChild(downloadBtn);
+  overlay.appendChild(zoomBtn);
+
+  wrap.appendChild(img);
+  wrap.appendChild(overlay);
+  return wrap;
+}
+
 function renderMessageInDOM(role, text, imageAttachment = null, generatedImages = []) {
   emptyState.setAttribute('aria-hidden', 'true');
 
@@ -791,16 +845,7 @@ function renderMessageInDOM(role, text, imageAttachment = null, generatedImages 
 
     if (generatedImages && generatedImages.length > 0) {
       for (const genImg of generatedImages) {
-        const wrap = document.createElement('div');
-        wrap.className = 'message-image-wrapper';
-        const img = document.createElement('img');
-        img.src = genImg.dataUrl || genImg.src;
-        img.alt = genImg.alt || 'Imagem gerada pela IA';
-        img.className = 'message-img';
-        img.loading = 'lazy';
-        img.addEventListener('click', () => openLightbox(img.src));
-        wrap.appendChild(img);
-        bubble.appendChild(wrap);
+        bubble.appendChild(createImageElement(genImg));
       }
     }
 
@@ -971,16 +1016,7 @@ form.addEventListener('submit', async (e) => {
 
                 if (payload.images && payload.images.length > 0) {
                   for (const genImg of payload.images) {
-                    const wrap = document.createElement('div');
-                    wrap.className = 'message-image-wrapper';
-                    const img = document.createElement('img');
-                    img.src = genImg.dataUrl || genImg.src;
-                    img.alt = genImg.alt || 'Imagem gerada';
-                    img.className = 'message-img';
-                    img.loading = 'lazy';
-                    img.addEventListener('click', () => openLightbox(img.src));
-                    wrap.appendChild(img);
-                    bubble.appendChild(wrap);
+                    bubble.appendChild(createImageElement(genImg));
                   }
                 }
                 scrollToBottom();
@@ -998,6 +1034,11 @@ form.addEventListener('submit', async (e) => {
       accumulatedText = data.text;
       finalResultData = data;
       bubble.innerHTML = parseMarkdown(data.text);
+      if (data.images && data.images.length > 0) {
+        for (const genImg of data.images) {
+          bubble.appendChild(createImageElement(genImg));
+        }
+      }
     }
 
     const aiMsgObj = {

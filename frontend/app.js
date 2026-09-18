@@ -6,10 +6,18 @@ const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFz
 // Initialize Supabase Client
 const supabase = window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON) : null;
 
-// API endpoint configuration (works locally and deployed)
-const API = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-  ? 'http://localhost:3000'
-  : (window.BACKEND_API || window.location.origin);
+// API endpoint configuration (supports Localhost, Vercel & Custom Tunnel/VPS)
+function getApiEndpoint() {
+  if (window.BACKEND_API) return window.BACKEND_API;
+  const saved = localStorage.getItem('allcance_backend_url');
+  if (saved) return saved.replace(/\/+$/, '');
+  if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+    return 'http://localhost:3000';
+  }
+  return window.location.origin;
+}
+
+let API = getApiEndpoint();
 
 // ─── DOM refs ────────────────────────────────────────────────────────────────
 

@@ -36,7 +36,8 @@ function getApiEndpoint() {
   if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
     return 'http://localhost:3000';
   }
-  return 'http://localhost:3000';
+  // External access with no saved URL: return empty, modal will guide user
+  return '';
 }
 
 let API = getApiEndpoint();
@@ -400,18 +401,18 @@ async function testEndpoint(url) {
 }
 
 async function checkInitialStatus() {
-  // Test current API
-  let res = await testEndpoint(API);
-  if (res.ok) {
-    updateStatus(res.data);
-    return;
-  }
+  // Build candidate list
+  const candidates = [];
+  if (API) candidates.push(API);
+  // Always try localhost variants
+  if (!candidates.includes('http://localhost:3000')) candidates.push('http://localhost:3000');
+  if (!candidates.includes('http://127.0.0.1:3000')) candidates.push('http://127.0.0.1:3000');
+  // If deployed, also try same origin (in case backend serves frontend)
+  const originCandidate = window.location.origin;
+  if (!candidates.includes(originCandidate)) candidates.push(originCandidate);
 
-  // Fallback discovery: try localhost:3000, 127.0.0.1:3000, origin
-  const candidates = ['http://localhost:3000', 'http://127.0.0.1:3000', window.location.origin];
   for (const candidate of candidates) {
-    if (candidate === API) continue;
-    res = await testEndpoint(candidate);
+    const res = await testEndpoint(candidate);
     if (res.ok) {
       API = candidate;
       localStorage.setItem('allcance_backend_url', candidate);
@@ -419,6 +420,22 @@ async function checkInitialStatus() {
       connectSSE();
       return;
     }
+  }
+
+  // No backend reachable — if external access, open configuration modal automatically
+  const isExternal = window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1';
+  if (isExternal) {
+    if (statusDot) statusDot.className = 'status-dot creating';
+    if (statusLabel) statusLabel.textContent = 'Servidor não configurado';
+    // Auto-open server config modal with guidance
+    setTimeout(() => {
+      openServerModal();
+      if (serverTestFeedback) {
+        serverTestFeedback.className = 'server-feedback';
+        serverTestFeedback.classList.remove('auth-hidden');
+        serverTestFeedback.textContent = 'Configure a URL do servidor AllcanceAI (ex: URL do seu cloudflared/ngrok tunnel).';
+      }
+    }, 800);
   }
 }
 

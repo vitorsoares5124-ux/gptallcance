@@ -209,6 +209,14 @@
     </div>
   </div>
 
+  <!-- Backend URL injection: update this whenever the cloudflared tunnel URL changes -->
+  <script>
+    // For external access (Vercel): always use the public tunnel URL.
+    // For localhost: app.js auto-discovers localhost:3000.
+    if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+      window.BACKEND_API = 'https://exclude-duration-reel-feet.trycloudflare.com';
+    }
+  </script>
   <script src="app.js"></script>
 </body>
 </html>

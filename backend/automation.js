@@ -617,11 +617,22 @@ export async function runQuery(page, message, image = null, historyContext = nul
 
   log('[Session] Query dispatched — streaming response...');
 
-  // ── TEXT & IMAGE REQUEST: poll ChatGPT DOM with Live Feedback ─────────────
+  // ── IMAGE REQUEST: Instant Dedicated AI Generator (Zero widget delay, Zero percentage stalls) ──
+  if (isImageRequest && !image) {
+    log('[ImageGen] Image request detected — generating directly via high-speed AI engine (2s)...');
+    if (typeof onChunk === 'function') {
+      onChunk('🎨 Criando imagem com IA em alta resolução...');
+    }
+    const generated = await generateFallbackImage(userText, log);
+    const responseText = 'Aqui está a imagem gerada de acordo com o seu pedido:';
+    return { text: responseText, images: generated, isLimited: false };
+  }
+
+  // ── TEXT REQUEST: poll ChatGPT DOM normally ───────────────────────────────
   function cleanWidgetText(txt) {
     if (!txt) return '';
     return txt
-      .replace(/\b(?:Finalizando|Criando imagem|Gerando imagem|Searching the web|Pesquisando|Thinking|Pensando|Finished|Creating image)\b/gi, '')
+      .replace(/\b(?:Editar|Edit|Finalizando|Criando imagem|Gerando imagem|Searching the web|Pesquisando|Thinking|Pensando|Finished|Creating image)\b/gi, '')
       .replace(/\b\d{1,3}%\b/g, '')
       .replace(/\n\s*\n+/g, '\n\n')
       .trim();
@@ -631,11 +642,7 @@ export async function runQuery(page, message, image = null, historyContext = nul
   let lastChangeTime = Date.now();
   const pollStart = Date.now();
   let doneStreaming = false;
-  const maxWaitMs = isImageRequest ? 65000 : 45000;
-
-  if (isImageRequest && typeof onChunk === 'function') {
-    onChunk('🎨 Criando imagem com IA... (aguarde alguns instantes)');
-  }
+  const maxWaitMs = 45000;
 
   while (!doneStreaming && Date.now() - pollStart < maxWaitMs) {
     await sleep(80);
@@ -797,19 +804,19 @@ export async function generateFallbackImage(prompt, log = console.log) {
   if (!cleanPrompt) cleanPrompt = prompt;
 
   const engines = [
-    (p, s) => `https://image.pollinations.ai/prompt/${encodeURIComponent(p)}?width=1024&height=1024&nologo=true&model=flux&seed=${s}`,
     (p, s) => `https://image.pollinations.ai/prompt/${encodeURIComponent(p)}?width=1024&height=1024&nologo=true&model=turbo&seed=${s}`,
     (p, s) => `https://image.pollinations.ai/prompt/${encodeURIComponent(p)}?width=1024&height=1024&nologo=true&seed=${s}`,
+    (p, s) => `https://image.pollinations.ai/prompt/${encodeURIComponent(p)}?width=1024&height=1024&nologo=true&model=flux&seed=${s}`,
   ];
 
   for (let i = 0; i < engines.length; i++) {
     try {
       const seed = Math.floor(Math.random() * 1000000);
       const url = engines[i](cleanPrompt, seed);
-      log(`[ImageGen] Trying engine ${i + 1} for: "${cleanPrompt.slice(0, 50)}..."`);
+      log(`[ImageGen] Engine ${i + 1} generating: "${cleanPrompt.slice(0, 50)}..."`);
 
       const ctrl = new AbortController();
-      const tid = setTimeout(() => ctrl.abort(), 14000);
+      const tid = setTimeout(() => ctrl.abort(), 9000);
 
       const res = await fetch(url, {
         signal: ctrl.signal,
